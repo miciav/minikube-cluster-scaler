@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,9 +200,226 @@ func TestRefreshPropagatesCommandFailure(t *testing.T) {
 	}
 }
 
+func TestNodeGroupIncreaseSizeDryRun(t *testing.T) {
+	var logs bytes.Buffer
+	var commands int
+	run := func(context.Context, string, ...string) ([]byte, []byte, error) {
+		commands++
+		return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}), nil, nil
+	}
+	p := testProviderWithLogger(t, true, run, log.New(&logs, "", 0))
+	p.target = 1
+
+	if _, err := p.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if commands != 0 {
+		t.Fatalf("commands after increase = %d, want 0", commands)
+	}
+	if got := targetSize(t, p); got != 2 {
+		t.Fatalf("target size = %d, want 2", got)
+	}
+	if logText := logs.String(); !strings.Contains(logText, "group=minikube-workers") || !strings.Contains(logText, "delta=1") || !strings.Contains(logText, "current=1") || !strings.Contains(logText, "dry-run=true") {
+		t.Fatalf("logs = %q", logText)
+	}
+
+	if _, err := p.Refresh(context.Background(), &protos.RefreshRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := targetSize(t, p); got != 2 {
+		t.Fatalf("target size after refresh = %d, want 2", got)
+	}
+}
+
+func TestNodeGroupIncreaseSizeRejectsInvalidRequests(t *testing.T) {
+	var commands int
+	p := testProvider(t, true, func(context.Context, string, ...string) ([]byte, []byte, error) {
+		commands++
+		return nil, nil, errors.New("unexpected command")
+	})
+	p.target = 1
+
+	tests := []struct {
+		name string
+		req  *protos.NodeGroupIncreaseSizeRequest
+		code codes.Code
+	}{
+		{name: "beyond maximum", req: &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 3}, code: codes.FailedPrecondition},
+		{name: "zero delta", req: &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers"}, code: codes.InvalidArgument},
+		{name: "negative delta", req: &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: -1}, code: codes.InvalidArgument},
+		{name: "unknown group", req: &protos.NodeGroupIncreaseSizeRequest{Id: "unknown", Delta: 1}, code: codes.NotFound},
+		{name: "nil request", code: codes.NotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := p.NodeGroupIncreaseSize(context.Background(), tt.req)
+			if got := status.Code(err); got != tt.code {
+				t.Fatalf("status = %v, want %v (error %v)", got, tt.code, err)
+			}
+		})
+	}
+	if got := targetSize(t, p); got != 1 {
+		t.Fatalf("target size = %d, want 1", got)
+	}
+	if commands != 0 {
+		t.Fatalf("commands = %d, want 0", commands)
+	}
+}
+
+func TestNodeGroupIncreaseSizeAddsAndRefreshesEachNode(t *testing.T) {
+	commands := []string{"minikube", "kubectl", "minikube", "kubectl"}
+	nodeCounts := []int{2, 3}
+	call := 0
+	p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+		if call >= len(commands) || name != commands[call] {
+			t.Fatalf("command %d = %q, want sequence %v", call, name, commands)
+		}
+		call++
+		if name == "minikube" {
+			return nil, nil, nil
+		}
+		count := nodeCounts[0]
+		nodeCounts = nodeCounts[1:]
+		nodes := make([]corev1.Node, count)
+		for i := range nodes {
+			nodes[i].Name = fmt.Sprintf("node-%d", i)
+		}
+		return nodeList(nodes...), nil, nil
+	})
+	p.nodes = []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}}}
+	p.target = 1
+
+	if _, err := p.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if call != len(commands) {
+		t.Fatalf("commands run = %d, want %d", call, len(commands))
+	}
+	if got := targetSize(t, p); got != 3 {
+		t.Fatalf("target size = %d, want 3", got)
+	}
+	if len(p.nodes) != 3 {
+		t.Fatalf("observed nodes = %d, want 3", len(p.nodes))
+	}
+}
+
+func TestNodeGroupIncreaseSizeMapsCommandFailures(t *testing.T) {
+	t.Run("add node preserves refreshed partial progress", func(t *testing.T) {
+		call := 0
+		p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+			call++
+			switch call {
+			case 1:
+				if name != "minikube" {
+					t.Fatalf("command 1 = %q, want minikube", name)
+				}
+				return nil, nil, nil
+			case 2:
+				if name != "kubectl" {
+					t.Fatalf("command 2 = %q, want kubectl", name)
+				}
+				return nodeList(
+					corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+					corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+				), nil, nil
+			case 3:
+				if name != "minikube" {
+					t.Fatalf("command 3 = %q, want minikube", name)
+				}
+				return nil, []byte("capacity exhausted"), errors.New("add failed")
+			default:
+				t.Fatalf("unexpected command %d: %s", call, name)
+				return nil, nil, nil
+			}
+		})
+		p.target = 1
+
+		_, err := p.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 2})
+		if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "add failed") || !strings.Contains(err.Error(), "capacity exhausted") {
+			t.Fatalf("error = %v", err)
+		}
+		if call != 3 {
+			t.Fatalf("commands = %d, want 3", call)
+		}
+		if got := targetSize(t, p); got != 2 {
+			t.Fatalf("target size = %d, want 2", got)
+		}
+	})
+
+	t.Run("refresh nodes", func(t *testing.T) {
+		call := 0
+		p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+			call++
+			if call == 1 {
+				return nil, nil, nil
+			}
+			if call == 2 && name == "kubectl" {
+				return nil, []byte("api unavailable"), errors.New("refresh failed")
+			}
+			t.Fatalf("unexpected command %d: %s", call, name)
+			return nil, nil, nil
+		})
+		p.target = 1
+
+		_, err := p.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 2})
+		if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "refresh failed") || !strings.Contains(err.Error(), "api unavailable") {
+			t.Fatalf("error = %v", err)
+		}
+		if call != 2 {
+			t.Fatalf("commands = %d, want 2", call)
+		}
+		if got := targetSize(t, p); got != 1 {
+			t.Fatalf("target size = %d, want 1", got)
+		}
+	})
+}
+
+func TestNodeGroupIncreaseSizeSerializesConcurrentRequests(t *testing.T) {
+	var commands int
+	p := testProvider(t, true, func(context.Context, string, ...string) ([]byte, []byte, error) {
+		commands++
+		return nil, nil, errors.New("unexpected command")
+	})
+	p.target = 1
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := p.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 2})
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	counts := map[codes.Code]int{}
+	for err := range errs {
+		counts[status.Code(err)]++
+	}
+	if counts[codes.OK] != 1 || counts[codes.FailedPrecondition] != 1 {
+		t.Fatalf("status counts = %v", counts)
+	}
+	if got := targetSize(t, p); got != 3 {
+		t.Fatalf("target size = %d, want 3", got)
+	}
+	if commands != 0 {
+		t.Fatalf("commands = %d, want 0", commands)
+	}
+}
+
 func testProvider(t *testing.T, dryRun bool, run minikube.RunFunc) *Provider {
 	t.Helper()
 	logger := log.New(io.Discard, "", 0)
+	return testProviderWithLogger(t, dryRun, run, logger)
+}
+
+func testProviderWithLogger(t *testing.T, dryRun bool, run minikube.RunFunc, logger *log.Logger) *Provider {
+	t.Helper()
 	p, err := New(
 		Config{NodeGroup: "minikube-workers", MinNodes: 1, MaxNodes: 3, DryRun: dryRun},
 		minikube.New("demo", time.Second, logger, run),
@@ -210,6 +429,15 @@ func testProvider(t *testing.T, dryRun bool, run minikube.RunFunc) *Provider {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func targetSize(t *testing.T, p *Provider) int32 {
+	t.Helper()
+	size, err := p.NodeGroupTargetSize(context.Background(), &protos.NodeGroupTargetSizeRequest{Id: "minikube-workers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return size.TargetSize
 }
 
 func nodeRunner(nodes ...corev1.Node) minikube.RunFunc {

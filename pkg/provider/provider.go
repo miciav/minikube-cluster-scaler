@@ -24,12 +24,13 @@ type Config struct {
 
 type Provider struct {
 	protos.UnimplementedCloudProviderServer
-	mu     sync.Mutex
-	cfg    Config
-	client *minikube.Client
-	logger *log.Logger
-	nodes  []corev1.Node
-	target int32
+	mu      sync.Mutex
+	scaleMu sync.Mutex
+	cfg     Config
+	client  *minikube.Client
+	logger  *log.Logger
+	nodes   []corev1.Node
+	target  int32
 }
 
 func New(cfg Config, client *minikube.Client, logger *log.Logger) (*Provider, error) {
@@ -104,6 +105,53 @@ func (p *Provider) NodeGroupTargetSize(_ context.Context, req *protos.NodeGroupT
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return &protos.NodeGroupTargetSizeResponse{TargetSize: p.target}, nil
+}
+
+func (p *Provider) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGroupIncreaseSizeRequest) (*protos.NodeGroupIncreaseSizeResponse, error) {
+	p.scaleMu.Lock()
+	defer p.scaleMu.Unlock()
+
+	var group string
+	var delta int32
+	if req != nil {
+		group, delta = req.Id, req.Delta
+	}
+	p.mu.Lock()
+	current := p.target
+	p.logger.Printf("scale-up group=%s delta=%d current=%d dry-run=%t", group, delta, current, p.cfg.DryRun)
+	if req == nil || group != p.cfg.NodeGroup {
+		p.mu.Unlock()
+		return nil, status.Error(codes.NotFound, "unknown node group")
+	}
+	if delta <= 0 {
+		p.mu.Unlock()
+		return nil, status.Error(codes.InvalidArgument, "increase delta must be positive")
+	}
+	if delta > p.cfg.MaxNodes-current {
+		p.mu.Unlock()
+		return nil, status.Error(codes.FailedPrecondition, "increase exceeds maximum node group size")
+	}
+	if p.cfg.DryRun {
+		p.target += delta
+		p.mu.Unlock()
+		return &protos.NodeGroupIncreaseSizeResponse{}, nil
+	}
+	p.mu.Unlock()
+
+	for range delta {
+		if err := p.client.AddNode(ctx); err != nil {
+			return nil, status.Errorf(codes.Internal, "add minikube node: %v", err)
+		}
+		nodes, err := p.client.Nodes(ctx)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "refresh nodes after scale-up: %v", err)
+		}
+		p.mu.Lock()
+		p.nodes = append([]corev1.Node(nil), nodes...)
+		p.target = int32(len(nodes))
+		p.mu.Unlock()
+	}
+	return &protos.NodeGroupIncreaseSizeResponse{}, nil
 }
 
 func (p *Provider) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRequest) (*protos.NodeGroupNodesResponse, error) {

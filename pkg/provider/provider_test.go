@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +20,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestNewValidatesConfig(t *testing.T) {
@@ -147,6 +150,230 @@ func TestNodeGroupNodesReturnsRunningInstances(t *testing.T) {
 		if instance.Id != wantID || instance.Status == nil || instance.Status.InstanceState != protos.InstanceStatus_instanceRunning {
 			t.Fatalf("instance %d = %#v", i, instance)
 		}
+	}
+}
+
+func TestNodeGroupTemplateNodeInfoReturnsSanitizedObservedNode(t *testing.T) {
+	source := corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "demo",
+			UID:  types.UID("node-uid"),
+			Labels: map[string]string{
+				"kubernetes.io/arch":                    "amd64",
+				"kubernetes.io/os":                      "linux",
+				"node.kubernetes.io/instance-type":      "minikube",
+				"kubernetes.io/hostname":                "demo",
+				"node-role.kubernetes.io/control-plane": "",
+				"example.com/custom":                    "value",
+			},
+			Annotations: map[string]string{"example.com/annotation": "value"},
+		},
+		Spec: corev1.NodeSpec{
+			ProviderID: "minikube://demo",
+			Taints: []corev1.Taint{{
+				Key:    "node-role.kubernetes.io/control-plane",
+				Effect: corev1.TaintEffectNoSchedule,
+			}},
+		},
+		Status: corev1.NodeStatus{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("8Gi"),
+			},
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("3500m"),
+				corev1.ResourceMemory: resource.MustParse("7Gi"),
+			},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.0.2.1"}},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+			NodeInfo: corev1.NodeSystemInfo{
+				MachineID:               "machine-id",
+				SystemUUID:              "system-uuid",
+				BootID:                  "boot-id",
+				KernelVersion:           "kernel",
+				OSImage:                 "os-image",
+				ContainerRuntimeVersion: "container-runtime",
+				KubeletVersion:          "kubelet",
+				KubeProxyVersion:        "kube-proxy",
+				OperatingSystem:         "linux",
+				Architecture:            "amd64",
+			},
+		},
+	}
+	p := testProvider(t, false, nodeRunner(source))
+	if _, err := p.Refresh(context.Background(), &protos.RefreshRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	template := templateNode(t, p)
+	wantLabels := map[string]string{
+		"kubernetes.io/arch":               "amd64",
+		"kubernetes.io/os":                 "linux",
+		"node.kubernetes.io/instance-type": "minikube",
+	}
+	if !reflect.DeepEqual(template.Labels, wantLabels) {
+		t.Fatalf("labels = %v, want %v", template.Labels, wantLabels)
+	}
+	metadata := template.ObjectMeta.DeepCopy()
+	metadata.Labels = nil
+	if !reflect.DeepEqual(*metadata, metav1.ObjectMeta{}) {
+		t.Fatalf("unexpected metadata = %#v", *metadata)
+	}
+	if !reflect.DeepEqual(template.Spec, corev1.NodeSpec{}) {
+		t.Fatalf("unexpected spec = %#v", template.Spec)
+	}
+	if !reflect.DeepEqual(template.Status.Capacity, source.Status.Capacity) {
+		t.Fatalf("capacity = %v, want %v", template.Status.Capacity, source.Status.Capacity)
+	}
+	if !reflect.DeepEqual(template.Status.Allocatable, source.Status.Allocatable) {
+		t.Fatalf("allocatable = %v, want %v", template.Status.Allocatable, source.Status.Allocatable)
+	}
+	statusWithoutResources := template.Status.DeepCopy()
+	statusWithoutResources.Capacity = nil
+	statusWithoutResources.Allocatable = nil
+	if !reflect.DeepEqual(*statusWithoutResources, corev1.NodeStatus{}) {
+		t.Fatalf("unexpected status = %#v", *statusWithoutResources)
+	}
+}
+
+func TestNodeGroupTemplateNodeInfoDoesNotAliasObservedState(t *testing.T) {
+	source := corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"kubernetes.io/os": "linux"}},
+		Status: corev1.NodeStatus{
+			Capacity:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+			Allocatable: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("7Gi")},
+		},
+	}
+	p := testProvider(t, false, nodeRunner(source))
+	if _, err := p.Refresh(context.Background(), &protos.RefreshRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	observed := p.nodes[0].DeepCopy()
+
+	first := templateNode(t, p)
+	first.Labels["kubernetes.io/os"] = "mutated"
+	first.Status.Capacity[corev1.ResourceCPU] = resource.MustParse("1")
+	first.Status.Allocatable[corev1.ResourceMemory] = resource.MustParse("1Gi")
+
+	second := templateNode(t, p)
+	if second.Labels["kubernetes.io/os"] != "linux" {
+		t.Fatalf("second labels = %v", second.Labels)
+	}
+	assertResources(t, second.Status.Capacity, "4", "0")
+	if got := second.Status.Allocatable.Memory().String(); got != "7Gi" {
+		t.Fatalf("allocatable memory = %s, want 7Gi", got)
+	}
+	if !reflect.DeepEqual(p.nodes[0], *observed) {
+		t.Fatalf("observed node mutated: got %#v, want %#v", p.nodes[0], *observed)
+	}
+}
+
+func TestNodeGroupTemplateNodeInfoValidatesState(t *testing.T) {
+	p := testProvider(t, false, nodeRunner())
+	tests := []struct {
+		name   string
+		id     string
+		code   codes.Code
+		phrase string
+	}{
+		{name: "unknown group", id: "unknown", code: codes.NotFound, phrase: "unknown node group"},
+		{name: "no observed node", id: "minikube-workers", code: codes.FailedPrecondition, phrase: "no observed node"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := p.NodeGroupTemplateNodeInfo(context.Background(), &protos.NodeGroupTemplateNodeInfoRequest{Id: tt.id})
+			if status.Code(err) != tt.code || !strings.Contains(err.Error(), tt.phrase) {
+				t.Fatalf("error = %v, want %v containing %q", err, tt.code, tt.phrase)
+			}
+		})
+	}
+}
+
+func TestScaleDownBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		id      string
+		code    codes.Code
+		phrase  string
+		call    func(*Provider, string) error
+	}{
+		{name: "delete disabled", code: codes.FailedPrecondition, phrase: "scale-down disabled in this demo", id: "minikube-workers", call: deleteNodes},
+		{name: "delete enabled", enabled: true, code: codes.Unimplemented, phrase: "scale-down is not implemented in this demo", id: "minikube-workers", call: deleteNodes},
+		{name: "delete unknown group", enabled: true, code: codes.NotFound, phrase: "unknown node group", id: "unknown", call: deleteNodes},
+		{name: "decrease disabled", code: codes.FailedPrecondition, phrase: "scale-down disabled in this demo", id: "minikube-workers", call: decreaseTarget},
+		{name: "decrease enabled", enabled: true, code: codes.Unimplemented, phrase: "scale-down is not implemented in this demo", id: "minikube-workers", call: decreaseTarget},
+		{name: "decrease unknown group", enabled: true, code: codes.NotFound, phrase: "unknown node group", id: "unknown", call: decreaseTarget},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			var commands int
+			p := testProviderWithLogger(t, false, func(context.Context, string, ...string) ([]byte, []byte, error) {
+				commands++
+				return nil, nil, errors.New("unexpected command")
+			}, log.New(&logs, "", 0))
+			p.cfg.EnableScaleDown = tt.enabled
+			p.target = 2
+
+			err := tt.call(p, tt.id)
+			if status.Code(err) != tt.code || !strings.Contains(err.Error(), tt.phrase) {
+				t.Fatalf("error = %v, want %v containing %q", err, tt.code, tt.phrase)
+			}
+			if p.target != 2 {
+				t.Fatalf("target = %d, want 2", p.target)
+			}
+			if commands != 0 {
+				t.Fatalf("commands = %d, want 0", commands)
+			}
+			if !strings.Contains(logs.String(), "scale-down rejected") {
+				t.Fatalf("logs = %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestMinimalMiscRPCs(t *testing.T) {
+	p := testProvider(t, false, nodeRunner())
+	gpuLabel, err := p.GPULabel(context.Background(), &protos.GPULabelRequest{})
+	if err != nil || gpuLabel == nil || gpuLabel.Label != "" {
+		t.Fatalf("GPULabel() = %#v, %v", gpuLabel, err)
+	}
+	gpuTypes, err := p.GetAvailableGPUTypes(context.Background(), &protos.GetAvailableGPUTypesRequest{})
+	if err != nil || gpuTypes == nil || len(gpuTypes.GpuTypes) != 0 {
+		t.Fatalf("GetAvailableGPUTypes() = %#v, %v", gpuTypes, err)
+	}
+	cleanup, err := p.Cleanup(context.Background(), &protos.CleanupRequest{})
+	if err != nil || cleanup == nil {
+		t.Fatalf("Cleanup() = %#v, %v", cleanup, err)
+	}
+}
+
+func TestOptionalRPCsRemainUnimplemented(t *testing.T) {
+	p := testProvider(t, false, nodeRunner())
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "node price", call: func() error {
+			_, err := p.PricingNodePrice(context.Background(), &protos.PricingNodePriceRequest{})
+			return err
+		}},
+		{name: "pod price", call: func() error {
+			_, err := p.PricingPodPrice(context.Background(), &protos.PricingPodPriceRequest{})
+			return err
+		}},
+		{name: "node group options", call: func() error {
+			_, err := p.NodeGroupGetOptions(context.Background(), &protos.NodeGroupAutoscalingOptionsRequest{})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := status.Code(tt.call()); got != codes.Unimplemented {
+				t.Fatalf("status = %v, want %v", got, codes.Unimplemented)
+			}
+		})
 	}
 }
 
@@ -624,6 +851,39 @@ func TestNodeGroupIncreaseSizeMapsCallerCancellation(t *testing.T) {
 			t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.DeadlineExceeded, err)
 		}
 	})
+}
+
+func templateNode(t *testing.T, p *Provider) *corev1.Node {
+	t.Helper()
+	response, err := p.NodeGroupTemplateNodeInfo(context.Background(), &protos.NodeGroupTemplateNodeInfoRequest{Id: "minikube-workers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var node corev1.Node
+	if err := node.Unmarshal(response.NodeBytes); err != nil {
+		t.Fatalf("unmarshal template: %v", err)
+	}
+	return &node
+}
+
+func assertResources(t *testing.T, resources corev1.ResourceList, cpu, memory string) {
+	t.Helper()
+	if got := resources.Cpu().String(); got != cpu {
+		t.Fatalf("cpu = %s, want %s", got, cpu)
+	}
+	if got := resources.Memory().String(); got != memory {
+		t.Fatalf("memory = %s, want %s", got, memory)
+	}
+}
+
+func deleteNodes(p *Provider, id string) error {
+	_, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: id, Nodes: []*protos.ExternalGrpcNode{{Name: "node"}}})
+	return err
+}
+
+func decreaseTarget(p *Provider, id string) error {
+	_, err := p.NodeGroupDecreaseTargetSize(context.Background(), &protos.NodeGroupDecreaseTargetSizeRequest{Id: id, Delta: -1})
+	return err
 }
 
 func testProvider(t *testing.T, dryRun bool, run minikube.RunFunc) *Provider {

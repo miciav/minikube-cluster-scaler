@@ -241,3 +241,77 @@ func (p *Provider) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesR
 	}
 	return &protos.NodeGroupNodesResponse{Instances: instances}, nil
 }
+
+func (p *Provider) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.NodeGroupTemplateNodeInfoRequest) (*protos.NodeGroupTemplateNodeInfoResponse, error) {
+	if req == nil || req.Id != p.cfg.NodeGroup {
+		return nil, status.Error(codes.NotFound, "unknown node group")
+	}
+
+	p.mu.Lock()
+	if len(p.nodes) == 0 {
+		p.mu.Unlock()
+		return nil, status.Error(codes.FailedPrecondition, "no observed node")
+	}
+	observed := p.nodes[0]
+	template := corev1.Node{
+		Status: corev1.NodeStatus{
+			Capacity:    observed.Status.Capacity.DeepCopy(),
+			Allocatable: observed.Status.Allocatable.DeepCopy(),
+		},
+	}
+	template.Labels = map[string]string{}
+	for _, label := range []string{"kubernetes.io/arch", "kubernetes.io/os", "node.kubernetes.io/instance-type"} {
+		if value, ok := observed.Labels[label]; ok {
+			template.Labels[label] = value
+		}
+	}
+	p.mu.Unlock()
+
+	nodeBytes, err := template.Marshal()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal node template: %v", err)
+	}
+	return &protos.NodeGroupTemplateNodeInfoResponse{NodeBytes: nodeBytes}, nil
+}
+
+func (p *Provider) NodeGroupDeleteNodes(_ context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
+	var group string
+	if req != nil {
+		group = req.Id
+	}
+	return nil, p.rejectScaleDown(group)
+}
+
+func (p *Provider) NodeGroupDecreaseTargetSize(_ context.Context, req *protos.NodeGroupDecreaseTargetSizeRequest) (*protos.NodeGroupDecreaseTargetSizeResponse, error) {
+	var group string
+	if req != nil {
+		group = req.Id
+	}
+	return nil, p.rejectScaleDown(group)
+}
+
+func (p *Provider) rejectScaleDown(group string) error {
+	var err error
+	switch {
+	case group != p.cfg.NodeGroup:
+		err = status.Error(codes.NotFound, "unknown node group")
+	case !p.cfg.EnableScaleDown:
+		err = status.Error(codes.FailedPrecondition, "scale-down disabled in this demo")
+	default:
+		err = status.Error(codes.Unimplemented, "scale-down is not implemented in this demo")
+	}
+	p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
+	return err
+}
+
+func (p *Provider) GPULabel(context.Context, *protos.GPULabelRequest) (*protos.GPULabelResponse, error) {
+	return &protos.GPULabelResponse{}, nil
+}
+
+func (p *Provider) GetAvailableGPUTypes(context.Context, *protos.GetAvailableGPUTypesRequest) (*protos.GetAvailableGPUTypesResponse, error) {
+	return &protos.GetAvailableGPUTypesResponse{}, nil
+}
+
+func (p *Provider) Cleanup(context.Context, *protos.CleanupRequest) (*protos.CleanupResponse, error) {
+	return &protos.CleanupResponse{}, nil
+}

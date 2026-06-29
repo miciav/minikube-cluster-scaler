@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+cd "$(dirname "$0")/.."
+
 PROFILE=${PROFILE:-autoscaling-demo}
 
 kubectl --context "$PROFILE" apply -f deploy/workload-unschedulable.yaml

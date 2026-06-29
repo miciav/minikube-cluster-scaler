@@ -27,8 +27,12 @@ if [ -z "$KUBERNETES_VERSION" ] || [ -z "$CA_VERSION" ]; then
   exit 1
 fi
 
-kubernetes_minor=$(printf '%s\n' "$KUBERNETES_VERSION" | sed -E 's/^v?([0-9]+\.[0-9]+).*/\1/')
-ca_minor=$(printf '%s\n' "$CA_VERSION" | sed -E 's/^v?([0-9]+\.[0-9]+).*/\1/')
+kubernetes_minor=$(printf '%s\n' "$KUBERNETES_VERSION" | sed -E -n 's/^v?([0-9]+\.[0-9]+)(\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?)?$/\1/p')
+ca_minor=$(printf '%s\n' "$CA_VERSION" | sed -E -n 's/^v?([0-9]+\.[0-9]+)(\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?)?$/\1/p')
+if [ -z "$kubernetes_minor" ] || [ -z "$ca_minor" ]; then
+  printf 'error: invalid version: Kubernetes %s, Cluster Autoscaler %s\n' "$KUBERNETES_VERSION" "$CA_VERSION" >&2
+  exit 1
+fi
 if [ "$kubernetes_minor" != "$ca_minor" ]; then
   printf 'error: Kubernetes %s and Cluster Autoscaler %s must have the same major.minor version\n' "$KUBERNETES_VERSION" "$CA_VERSION" >&2
   exit 1

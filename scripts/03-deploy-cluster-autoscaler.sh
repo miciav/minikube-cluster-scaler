@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+cd "$(dirname "$0")/.."
+
 PROFILE=${PROFILE:-autoscaling-demo}
 CA_VERSION=${CA_VERSION:-v1.35.0}
 

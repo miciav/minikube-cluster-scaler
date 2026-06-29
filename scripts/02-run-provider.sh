@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+cd "$(dirname "$0")/.."
+
 PROFILE=${PROFILE:-autoscaling-demo}
 MIN_NODES=${MIN_NODES:-1}
 MAX_NODES=${MAX_NODES:-3}

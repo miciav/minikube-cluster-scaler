@@ -38,11 +38,13 @@ There is one node group: profile `autoscaling-demo`, group `minikube-workers`, m
 
 Defaults are Kubernetes `v1.35.6` and Cluster Autoscaler `v1.35.0`. Kubernetes and CA must have the same major/minor version; their patch versions need not match. The committed proto and generated Go code must come from the same CA tag as the deployed image.
 
-Override the pair together before running the scripts:
+The current pinned pair can be exported together before running the scripts:
 
 ```sh
-export KUBERNETES_VERSION=v1.35.7 CA_VERSION=v1.35.1
+export KUBERNETES_VERSION=v1.35.6 CA_VERSION=v1.35.0
 ```
+
+To upgrade, choose Kubernetes and CA releases with the same major/minor, set both variables together, and replace or regenerate the official proto and generated Go bindings from the exact chosen CA tag. Do not change only the CA image tag.
 
 The schema is the official [`externalgrpc.proto` from the `cluster-autoscaler-1.35.0` tag](https://github.com/kubernetes/autoscaler/blob/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto). Generated code is committed, so `protoc` is optional unless regenerating it with `./proto/generate.sh`.
 
@@ -78,7 +80,9 @@ To demonstrate decisions without changing minikube, replace the final Terminal 1
 ./scripts/02-run-provider.sh --dry-run
 ```
 
-Expected evidence, in order:
+Dry-run proves only that CA calls the provider, `NodeGroupIncreaseSize` is reached, and the provider logs what it would do. It does not add a node, so the pressure Pods stay `Pending`.
+
+In real mode, expected evidence is, in order:
 
 1. At least one pressure Pod becomes `Pending`.
 2. CA logs show an unschedulable Pod and a scale-up decision.

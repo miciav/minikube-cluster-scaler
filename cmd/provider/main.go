@@ -19,6 +19,8 @@ import (
 	"google.golang.org/grpc"
 )
 
+const shutdownGracePeriod = 5 * time.Second
+
 type options struct {
 	listen          string
 	profile         string
@@ -44,6 +46,9 @@ func parseFlags(args []string) (options, error) {
 	flags.IntVar(&opts.verbosity, "v", 1, "log verbosity")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
+	}
+	if flags.NArg() != 0 {
+		return options{}, fmt.Errorf("unexpected positional arguments: %q", flags.Args())
 	}
 	if opts.listen == "" {
 		return options{}, fmt.Errorf("listen address is required")
@@ -76,6 +81,20 @@ func (opts options) providerConfig() providerpkg.Config {
 		MaxNodes:        int32(opts.maxNodes),
 		DryRun:          opts.dryRun,
 		EnableScaleDown: opts.enableScaleDown,
+	}
+}
+
+func stopWithTimeout(gracefulStop, forceStop func(), timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		gracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		forceStop()
+		<-done
 	}
 }
 
@@ -113,7 +132,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		return fmt.Errorf("gRPC server stopped unexpectedly")
 	case <-ctx.Done():
-		server.GracefulStop()
+		stopWithTimeout(server.GracefulStop, server.Stop, shutdownGracePeriod)
 		<-serveErr
 		return nil
 	}

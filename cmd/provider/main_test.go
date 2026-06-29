@@ -1,9 +1,9 @@
 package main
 
 import (
-	"math"
 	"reflect"
 	"testing"
+	"time"
 
 	providerpkg "example.com/minikube-externalgrpc-autoscaler-demo/pkg/provider"
 )
@@ -68,6 +68,7 @@ func TestParseFlagsRejectsInvalidOptions(t *testing.T) {
 		"max overflow":   {"--max-nodes", "2147483648"},
 		"negative v":     {"--v=-1"},
 		"unknown flag":   {"--wat"},
+		"positional arg": {"extra"},
 	}
 	for name, args := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -81,19 +82,47 @@ func TestParseFlagsRejectsInvalidOptions(t *testing.T) {
 func TestProviderConfig(t *testing.T) {
 	opts := options{
 		nodeGroup:       "workers",
-		minNodes:        math.MinInt32,
-		maxNodes:        math.MaxInt32,
+		minNodes:        0,
+		maxNodes:        2147483647,
 		dryRun:          true,
 		enableScaleDown: true,
 	}
 	want := providerpkg.Config{
 		NodeGroup:       "workers",
-		MinNodes:        math.MinInt32,
-		MaxNodes:        math.MaxInt32,
+		MinNodes:        0,
+		MaxNodes:        2147483647,
 		DryRun:          true,
 		EnableScaleDown: true,
 	}
 	if got := opts.providerConfig(); got != want {
 		t.Fatalf("providerConfig() = %+v, want %+v", got, want)
+	}
+}
+
+func TestStopWithTimeoutForcesBlockedGracefulStop(t *testing.T) {
+	blocked := make(chan struct{})
+	forced := make(chan struct{}, 1)
+	returned := make(chan struct{})
+	go func() {
+		stopWithTimeout(
+			func() { <-blocked },
+			func() {
+				forced <- struct{}{}
+				close(blocked)
+			},
+			time.Millisecond,
+		)
+		close(returned)
+	}()
+
+	select {
+	case <-forced:
+	case <-time.After(time.Second):
+		t.Fatal("force stop was not called")
+	}
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("stopWithTimeout did not return")
 	}
 }

@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: cluster-autoscaler
+          # Pin the demo to the matching externalgrpc protocol release.
+          image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.35.0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 100m
+              memory: 300Mi
+          command:
+            - ./cluster-autoscaler
+            - --cloud-provider=externalgrpc
+            - --cloud-config=/etc/cluster-autoscaler/cloud-config.yaml
+            - --scale-down-enabled=false
+            - --v=5
+          volumeMounts:
+            # Plaintext is intentional for this local teaching demo.
+            - name: cloud-config
+              mountPath: /etc/cluster-autoscaler/cloud-config.yaml
+              subPath: cloud-config.yaml
+              readOnly: true
+      volumes:
+        - name: cloud-config
+          configMap:
+            name: cluster-autoscaler-cloud-config

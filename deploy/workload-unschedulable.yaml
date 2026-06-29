@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autoscaler-pressure
+  namespace: default
+spec:
+  # Four replicas request 2.4 CPU total, exceeding one 2-CPU node.
+  replicas: 4
+  selector:
+    matchLabels:
+      app: autoscaler-pressure
+  template:
+    metadata:
+      labels:
+        app: autoscaler-pressure
+    spec:
+      containers:
+        - name: pause
+          # The workload becomes schedulable after adding node capacity.
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: 600m
+              memory: 64Mi
+            limits:
+              cpu: 600m
+              memory: 64Mi

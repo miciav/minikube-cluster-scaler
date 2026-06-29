@@ -4,7 +4,7 @@ metadata:
   name: autoscaler-pressure
   namespace: default
 spec:
-  # Four replicas request 2.4 CPU total, exceeding one 2-CPU node.
+  # The demo script adjusts CPU requests to the node capacity at runtime.
   replicas: 4
   selector:
     matchLabels:
@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: pause
-          # The workload becomes schedulable after adding node capacity.
+          # This default is useful when applying the manifest directly.
           image: registry.k8s.io/pause:3.10
           resources:
             requests:

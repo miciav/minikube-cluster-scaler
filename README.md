@@ -54,7 +54,7 @@ The schema is the official [`externalgrpc.proto` from the `cluster-autoscaler-1.
 
 Install `minikube`, `kubectl`, and Go 1.25+ (or a Go installation compatible with automatic toolchain selection). The default Docker path also needs a running Docker daemon. Run the prerequisite check before creating the cluster.
 
-Each minikube node defaults to 2 CPUs and 4 GiB of memory. Adding a node increases host CPU, memory, and disk consumption. On a smaller lecture machine, set `MINIKUBE_CPUS` and `MINIKUBE_MEMORY`, then tune the workload requests in [`deploy/workload-unschedulable.yaml`](deploy/workload-unschedulable.yaml) so it is Pending on one node but fits after another joins.
+Each minikube node defaults to 2 CPUs and 4 GiB of memory. Adding a node increases host CPU, memory, and disk consumption. On a smaller lecture machine, set `MINIKUBE_CPUS` and `MINIKUBE_MEMORY`; the pressure script sizes CPU requests from the node capacity reported by Kubernetes.
 
 ## Manual lecture flow
 
@@ -160,7 +160,7 @@ kubectl apply --dry-run=client -f deploy/workload-unschedulable.yaml
 - **Docker or resource failure:** verify `docker info`, free host resources, or lower `MINIKUBE_CPUS`/`MINIKUBE_MEMORY`. Remember that every added node consumes more host resources.
 - **Port 9090 or host reachability:** ensure nothing else owns port 9090. The provider must bind `0.0.0.0:9090`, not loopback, so `host.minikube.internal:9090` is reachable. `./scripts/03-deploy-cluster-autoscaler.sh` performs a best-effort probe.
 - **No scale-up:** inspect CA logs and Pending Pod events with the commands above. Confirm the provider is still running in Terminal 1.
-- **No Pending Pod, or Pods never fit:** adjust replicas and CPU requests in [`deploy/workload-unschedulable.yaml`](deploy/workload-unschedulable.yaml) for the selected node size.
+- **No Pending Pod, or Pods never fit:** inspect the allocatable CPU reported by `kubectl get nodes`; the pressure script sizes each request to one third of the first node.
 
 ## Cleanup
 

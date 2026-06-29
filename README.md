@@ -34,6 +34,8 @@ The single initial minikube node is both control plane and worker, and is counte
 
 There is one node group: profile `autoscaling-demo`, group `minikube-workers`, minimum 1, maximum 3. The Docker driver is the tested path; other `MINIKUBE_DRIVER` values are best effort.
 
+Always use a dedicated, disposable `PROFILE` for this demo. Cleanup deletes the entire selected minikube profile, including every workload in it.
+
 ## Version policy
 
 Defaults are Kubernetes `v1.35.6` and Cluster Autoscaler `v1.35.0`. Kubernetes and CA must have the same major/minor version; their patch versions need not match. The committed proto and generated Go code must come from the same CA tag as the deployed image.
@@ -44,13 +46,13 @@ The current pinned pair can be exported together before running the scripts:
 export KUBERNETES_VERSION=v1.35.6 CA_VERSION=v1.35.0
 ```
 
-To upgrade, choose Kubernetes and CA releases with the same major/minor, set both variables together, and replace or regenerate the official proto and generated Go bindings from the exact chosen CA tag. Do not change only the CA image tag.
+To upgrade, choose Kubernetes and CA releases with the same major/minor and set both variables together. First download or copy `externalgrpc.proto` from the exact chosen CA tag into [`proto/externalgrpc.proto`](proto/externalgrpc.proto), then run `./proto/generate.sh` to regenerate the Go bindings. The generation script uses the local schema; it does not fetch one. Do not change only the CA image tag.
 
 The schema is the official [`externalgrpc.proto` from the `cluster-autoscaler-1.35.0` tag](https://github.com/kubernetes/autoscaler/blob/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto). Generated code is committed, so `protoc` is optional unless regenerating it with `./proto/generate.sh`.
 
 ## Prerequisites and host resources
 
-Install `minikube`, `kubectl`, and Go. The default Docker path also needs a running Docker daemon. Run the prerequisite check before creating the cluster.
+Install `minikube`, `kubectl`, and Go 1.25+ (or a Go installation compatible with automatic toolchain selection). The default Docker path also needs a running Docker daemon. Run the prerequisite check before creating the cluster.
 
 Each minikube node defaults to 2 CPUs and 4 GiB of memory. Adding a node increases host CPU, memory, and disk consumption. On a smaller lecture machine, set `MINIKUBE_CPUS` and `MINIKUBE_MEMORY`, then tune the workload requests in [`deploy/workload-unschedulable.yaml`](deploy/workload-unschedulable.yaml) so it is Pending on one node but fits after another joins.
 
@@ -80,16 +82,17 @@ To demonstrate decisions without changing minikube, replace the final Terminal 1
 ./scripts/02-run-provider.sh --dry-run
 ```
 
-Dry-run proves only that CA calls the provider, `NodeGroupIncreaseSize` is reached, and the provider logs what it would do. It does not add a node, so the pressure Pods stay `Pending`.
+Dry-run proves only that CA calls the provider. The provider emits `scale-up request group=minikube-workers ... dry-run=true` and `scale-up succeeded ... dry-run=true`; it emits no minikube command and adds no node, so the pressure Pods stay `Pending`.
 
 In real mode, expected evidence is, in order:
 
 1. At least one pressure Pod becomes `Pending`.
 2. CA logs show an unschedulable Pod and a scale-up decision.
-3. Provider logs show `NodeGroupIncreaseSize`.
-4. Provider logs show the `minikube node add -p autoscaling-demo` command.
-5. `kubectl` shows a second node becoming `Ready`.
-6. Pressure Pods become `Running`.
+3. Provider logs show `scale-up request group=minikube-workers ... dry-run=false`.
+4. The command log shows `exec: minikube ["node" "add" "-p" "autoscaling-demo"]`.
+5. Provider logs show `scale-up succeeded ... dry-run=false`.
+6. `kubectl` shows a second node becoming `Ready`.
+7. Pressure Pods become `Running`.
 
 Useful inspection commands:
 
@@ -108,7 +111,7 @@ Scripts read these environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PROFILE` | `autoscaling-demo` | minikube profile and kubectl context |
+| `PROFILE` | `autoscaling-demo` | dedicated disposable minikube profile and kubectl context |
 | `MINIKUBE_DRIVER` | `docker` | minikube driver; Docker is tested |
 | `KUBERNETES_VERSION` | `v1.35.6` | minikube Kubernetes version |
 | `CA_VERSION` | `v1.35.0` | Cluster Autoscaler image tag |
@@ -128,7 +131,7 @@ Scripts read these environment variables:
 | `--max-nodes` | `3` | maximum node count |
 | `--dry-run` | `false` | simulate increases without adding nodes |
 | `--enable-scale-down` | `false` | expose the future scale-down boundary |
-| `--v` | `1` | provider log verbosity value |
+| `--v` | `1` | accepted, parsed, and reported; didactic operation logs are currently unconditional |
 
 ## Automated verification
 
@@ -161,11 +164,13 @@ kubectl apply --dry-run=client -f deploy/workload-unschedulable.yaml
 
 ## Cleanup
 
-Stop the foreground provider with Ctrl-C, then delete only the demo resources and named profile:
+Stop the foreground provider with Ctrl-C, then run:
 
 ```sh
 ./scripts/99-cleanup.sh
 ```
+
+This deletes the entire selected `PROFILE` and every workload in it, not just resources created by the demo. Use only the dedicated disposable profile described above.
 
 ## TODO: future scale-down
 

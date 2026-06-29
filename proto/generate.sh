@@ -16,7 +16,7 @@ check_version() {
   fi
 }
 
-check_version protoc 'libprotoc 6.33.0'
+check_version protoc 'libprotoc 33.0'
 check_version protoc-gen-go 'protoc-gen-go v1.36.6'
 check_version protoc-gen-go-grpc 'protoc-gen-go-grpc 1.5.1'
 

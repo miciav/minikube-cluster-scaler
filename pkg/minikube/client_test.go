@@ -55,7 +55,7 @@ func TestCommandFailureIncludesOutputAndWrapsCause(t *testing.T) {
 	if err == nil || !errors.Is(err, cause) {
 		t.Fatalf("error = %v", err)
 	}
-	for _, text := range []string{"minikube node add -p demo", "partial output", "node creation failed"} {
+	for _, text := range []string{`minikube ["node" "add" "-p" "demo"]`, "partial output", "node creation failed"} {
 		if !strings.Contains(err.Error(), text) {
 			t.Fatalf("error %q does not contain %q", err, text)
 		}
@@ -65,10 +65,14 @@ func TestCommandFailureIncludesOutputAndWrapsCause(t *testing.T) {
 func TestCommandTimeout(t *testing.T) {
 	c := New("demo", time.Millisecond, nil, func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, error) {
 		<-ctx.Done()
-		return nil, nil, ctx.Err()
+		return nil, nil, errors.New("signal: killed")
 	})
 
-	if err := c.AddNode(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+	err := c.AddNode(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "signal: killed") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -82,7 +86,7 @@ func TestCommandIsLogged(t *testing.T) {
 	if err := c.AddNode(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(logs.String(), "minikube node add -p demo") {
+	if logs.String() != "exec: minikube [\"node\" \"add\" \"-p\" \"demo\"]\n" {
 		t.Fatalf("logs = %q", logs.String())
 	}
 }

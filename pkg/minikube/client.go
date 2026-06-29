@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"os/exec"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -55,11 +54,13 @@ func (c *Client) exec(parent context.Context, name string, args ...string) ([]by
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 
-	command := strings.Join(append([]string{name}, args...), " ")
-	c.logger.Printf("exec: %s", command)
+	c.logger.Printf("exec: %s %q", name, args)
 	stdout, stderr, err := c.run(ctx, name, args...)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w: stdout=%q stderr=%q", command, err, stdout, stderr)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("%s %q: %w: process error=%v: stdout=%q stderr=%q", name, args, ctxErr, err, stdout, stderr)
+		}
+		return nil, fmt.Errorf("%s %q: %w: stdout=%q stderr=%q", name, args, err, stdout, stderr)
 	}
 	return stdout, nil
 }

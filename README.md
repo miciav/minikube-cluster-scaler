@@ -113,6 +113,7 @@ Scripts read these environment variables:
 | --- | --- | --- |
 | `PROFILE` | `autoscaling-demo` | dedicated disposable minikube profile and kubectl context |
 | `MINIKUBE_DRIVER` | `docker` | minikube driver; Docker is tested |
+| `MINIKUBE_CNI` | `flannel` | CNI that configures workers added at runtime |
 | `KUBERNETES_VERSION` | `v1.35.6` | minikube Kubernetes version |
 | `CA_VERSION` | `v1.35.0` | Cluster Autoscaler image tag |
 | `MIN_NODES` | `1` | provider node-group minimum |

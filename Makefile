@@ -1,7 +1,12 @@
-.PHONY: test race vet build generate check start provider deploy pressure watch cleanup
+.PHONY: test shell-test race vet build generate check start provider deploy pressure watch cleanup
 
-test:
+test: shell-test
 	go test ./...
+
+shell-test:
+	./scripts/01-start-minikube_test.sh
+	./scripts/04-create-pressure_test.sh
+	./deploy/cluster-autoscaler-rbac_test.sh
 
 race:
 	go test -race ./...

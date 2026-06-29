@@ -139,12 +139,14 @@ Scripts read these environment variables:
 These checks do not run the live demo:
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
-go build -o /tmp/minikube-externalgrpc-provider ./cmd/provider
+make test
+make race
+make vet
+make build
 for script in scripts/*.sh proto/generate.sh; do sh -n "$script"; done
 ```
+
+`make test` runs the Go unit tests and all three shell regression checks. Use `make shell-test` to run only the shell checks.
 
 When a Kubernetes cluster is connected, validate the manifests without applying them:
 

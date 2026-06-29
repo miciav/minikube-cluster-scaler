@@ -94,7 +94,6 @@ func stopWithTimeout(gracefulStop, forceStop func(), timeout time.Duration) {
 	case <-done:
 	case <-time.After(timeout):
 		forceStop()
-		<-done
 	}
 }
 

@@ -100,16 +100,17 @@ func TestProviderConfig(t *testing.T) {
 }
 
 func TestStopWithTimeoutForcesBlockedGracefulStop(t *testing.T) {
-	blocked := make(chan struct{})
+	cleanup := make(chan struct{})
+	gracefulReturned := make(chan struct{})
 	forced := make(chan struct{}, 1)
 	returned := make(chan struct{})
 	go func() {
 		stopWithTimeout(
-			func() { <-blocked },
 			func() {
-				forced <- struct{}{}
-				close(blocked)
+				<-cleanup
+				close(gracefulReturned)
 			},
+			func() { forced <- struct{}{} },
 			time.Millisecond,
 		)
 		close(returned)
@@ -118,11 +119,21 @@ func TestStopWithTimeoutForcesBlockedGracefulStop(t *testing.T) {
 	select {
 	case <-forced:
 	case <-time.After(time.Second):
+		close(cleanup)
+		<-gracefulReturned
+		<-returned
 		t.Fatal("force stop was not called")
 	}
+	returnedPromptly := true
 	select {
 	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("stopWithTimeout did not return")
+	case <-time.After(50 * time.Millisecond):
+		returnedPromptly = false
+	}
+	close(cleanup)
+	<-gracefulReturned
+	<-returned
+	if !returnedPromptly {
+		t.Fatal("stopWithTimeout waited for graceful stop after forcing")
 	}
 }

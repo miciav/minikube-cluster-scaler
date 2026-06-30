@@ -1,69 +1,203 @@
 # minikube-cluster-scaler
 
-> **Teaching demo only — not for production.** The provider is deliberately fake, has no authentication or TLS, and exposes a **plaintext gRPC** endpoint on the host.
+`minikube-cluster-scaler` is a host-side implementation of the official Kubernetes Cluster Autoscaler [`externalgrpc`](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/cloudprovider/externalgrpc) cloud-provider API.
 
-This university lecture demo shows the official Kubernetes Cluster Autoscaler (CA) using its `externalgrpc` cloud-provider boundary to turn Pending Pods into a new minikube worker.
+It exposes a single minikube node group over gRPC and translates scale-up requests into:
 
-## Architecture and responsibilities
+```sh
+minikube node add -p <profile>
+```
+
+> **Demonstration only — not for production.** The provider has no authentication or TLS, exposes a plaintext gRPC endpoint, models only one node group, and does not implement scale-down.
+
+## Provider architecture
+
+```text
+Kubernetes Cluster Autoscaler
+        |
+        | externalgrpc
+        v
+host.minikube.internal:9090
+        |
+        v
+minikube-cluster-scaler on the host
+        |                         |
+        | kubectl get nodes       | minikube node add
+        v                         v
+observed node-group state     new minikube worker
+```
+
+Cluster Autoscaler retains all scheduling and autoscaling logic. This provider implements only the cloud-provider boundary required to observe and resize local minikube capacity.
+
+## Implemented externalgrpc behavior
+
+| RPC | Behavior |
+| --- | --- |
+| `NodeGroups` | Returns one group, `minikube-workers` by default. |
+| `NodeGroupForNode` | Maps nodes observed in the configured minikube profile to that group. |
+| `Refresh` | Refreshes provider state with `kubectl get nodes`. |
+| `NodeGroupTargetSize` | Returns the observed or dry-run target size. |
+| `NodeGroupNodes` | Returns the known running instances. |
+| `NodeGroupIncreaseSize` | Enforces bounds and executes one `minikube node add` per requested node. |
+| `NodeGroupTemplateNodeInfo` | Returns a protobuf-encoded worker template derived from the current node's allocatable resources. |
+| `NodeGroupDeleteNodes` | Returns `FailedPrecondition` while scale-down is disabled. |
+| `NodeGroupDecreaseTargetSize` | Returns `FailedPrecondition` while scale-down is disabled. |
+| `GPULabel`, `GetAvailableGPUTypes`, `Cleanup` | Return minimal successful responses. |
+| Pricing and node-group options | Remain officially `Unimplemented`. |
+
+Scale-up operations are serialized. Before changing capacity, the provider refreshes the observed nodes and checks the configured maximum. After every successful node addition it refreshes state again. Caller cancellation is propagated through gRPC, while command failures include stdout and stderr.
+
+The initial minikube node can act as both control plane and worker. It is counted as the first group member; nodes added later are worker-only. This deliberate simplification is safe for the implemented scale-up-only workflow.
+
+## Build and run the provider
+
+Requirements:
+
+- Go 1.25+ or compatible automatic toolchain selection
+- `minikube`
+- `kubectl`
+- an existing minikube profile
+
+Run directly:
+
+```sh
+go run ./cmd/provider \
+  --profile autoscaling-demo \
+  --node-group minikube-workers \
+  --min-nodes 1 \
+  --max-nodes 3 \
+  --listen 0.0.0.0:9090
+```
+
+Or build a binary:
+
+```sh
+make build
+/tmp/minikube-externalgrpc-provider --profile autoscaling-demo
+```
+
+### Provider flags
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--listen` | `0.0.0.0:9090` | gRPC listen address. All interfaces are required for minikube host access. |
+| `--profile` | `autoscaling-demo` | minikube profile and kubectl context. |
+| `--node-group` | `minikube-workers` | Node-group ID exposed to Cluster Autoscaler. |
+| `--min-nodes` | `1` | Minimum accepted group size. |
+| `--max-nodes` | `3` | Maximum accepted group size. |
+| `--dry-run` | `false` | Simulates target changes without invoking `minikube node add`. |
+| `--enable-scale-down` | `false` | Exposes the future scale-down boundary; removal remains unimplemented. |
+| `--v` | `1` | Accepted and reported; operation logs are currently unconditional. |
+
+Typical scale-up logs are intentionally explicit:
+
+```text
+scale-up request group=minikube-workers ... dry-run=false
+exec: minikube ["node" "add" "-p" "autoscaling-demo"]
+scale-up succeeded group=minikube-workers ... target=2 dry-run=false
+```
+
+## Cluster Autoscaler integration
+
+Cluster Autoscaler connects to the provider through this cloud configuration:
+
+```yaml
+address: host.minikube.internal:9090
+grpc_timeout: 10m
+```
+
+Required Cluster Autoscaler arguments:
+
+```text
+--cloud-provider=externalgrpc
+--cloud-config=/etc/cluster-autoscaler/cloud-config.yaml
+--scale-down-enabled=false
+```
+
+The provider must listen on `0.0.0.0`, not only `127.0.0.1`, because the Cluster Autoscaler Pod reaches the host through `host.minikube.internal`.
+
+The repository includes the required manifests in [`deploy/`](deploy/):
+
+- Cluster Autoscaler RBAC, including Kubernetes 1.35 informer permissions
+- externalgrpc cloud configuration
+- Cluster Autoscaler Deployment
+- a pressure workload used by the demo
+
+## Protocol and version policy
+
+The committed schema and generated bindings come from the official Cluster Autoscaler `cluster-autoscaler-1.35.0` tag:
+
+- Kubernetes: `v1.35.6`
+- Cluster Autoscaler: `v1.35.0`
+- [`externalgrpc.proto`](https://github.com/kubernetes/autoscaler/blob/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto): same CA tag
+
+Kubernetes and Cluster Autoscaler must use the same major/minor version; patch versions do not need to match.
+
+When upgrading:
+
+1. choose Kubernetes and Cluster Autoscaler releases with the same major/minor version;
+2. copy `externalgrpc.proto` from the exact Cluster Autoscaler tag into [`proto/externalgrpc.proto`](proto/externalgrpc.proto);
+3. install the generator versions checked by [`proto/generate.sh`](proto/generate.sh);
+4. run `./proto/generate.sh`;
+5. update `KUBERNETES_VERSION`, `CA_VERSION`, manifests, and tests together.
+
+Generated Go files are committed, so protobuf tooling is not required to build or run the provider.
+
+## Development
+
+```sh
+make test       # Go tests and shell regression checks
+make race       # Go race detector
+make vet        # Go static checks
+make build      # provider binary in /tmp
+make shell-test # shell regressions only
+```
+
+Validate shell syntax:
+
+```sh
+for script in scripts/*.sh deploy/*_test.sh proto/generate.sh; do
+  sh -n "$script"
+done
+```
+
+## Minikube scale-up demo
+
+The repository contains a complete local scenario:
 
 ```text
 Pending Pods
     |
     v
 official Cluster Autoscaler in minikube
-    | externalgrpc (plaintext)
+    | externalgrpc
     v
-host.minikube.internal:9090
-    |
-    v
-fake provider on the host
+provider on the host
     |
     v
 minikube node add
     |
     v
-new worker node
+new Ready worker -> Pending Pods become Running
 ```
 
-- The real Cluster Autoscaler makes the scheduling and scale-up decision.
-- The official `externalgrpc` API is the cloud-provider boundary.
-- The host provider implements one fake node group and translates the increase RPC.
-- The minikube CLI performs the actual local node provisioning.
+Always use a dedicated, disposable `PROFILE`. The cleanup script deletes the entire selected minikube profile and every workload in it.
 
-The single initial minikube node is both control plane and worker, and is counted as the first member of `minikube-workers`. Nodes added later are worker-only. This asymmetry is accepted for the lecture because scale-down is disabled.
+### Prerequisites and resources
 
-There is one node group: profile `autoscaling-demo`, group `minikube-workers`, minimum 1, maximum 3. The Docker driver is the tested path; other `MINIKUBE_DRIVER` values are best effort.
-
-Always use a dedicated, disposable `PROFILE` for this demo. Cleanup deletes the entire selected minikube profile, including every workload in it.
-
-## Version policy
-
-Defaults are Kubernetes `v1.35.6` and Cluster Autoscaler `v1.35.0`. Kubernetes and CA must have the same major/minor version; their patch versions need not match. The committed proto and generated Go code must come from the same CA tag as the deployed image.
-
-The current pinned pair can be exported together before running the scripts:
+Install `minikube`, `kubectl`, Go, and Docker for the tested driver path. Then run:
 
 ```sh
-export KUBERNETES_VERSION=v1.35.6 CA_VERSION=v1.35.0
+./scripts/00-check-prereqs.sh
 ```
 
-To upgrade, choose Kubernetes and CA releases with the same major/minor and set both variables together. First download or copy `externalgrpc.proto` from the exact chosen CA tag into [`proto/externalgrpc.proto`](proto/externalgrpc.proto), then run `./proto/generate.sh` to regenerate the Go bindings. The generation script uses the local schema; it does not fetch one. Do not change only the CA image tag.
+Each node defaults to 2 CPUs and 4 GiB. Added nodes consume additional host CPU, memory, and disk. The pressure script derives each Pod's CPU request from the first node's allocatable CPU, ensuring that four replicas require more than one node but fit across two equivalent nodes.
 
-The schema is the official [`externalgrpc.proto` from the `cluster-autoscaler-1.35.0` tag](https://github.com/kubernetes/autoscaler/blob/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto). Generated code is committed, so `protoc` is optional unless regenerating it with `./proto/generate.sh`.
-
-## Prerequisites and host resources
-
-Install `minikube`, `kubectl`, and Go 1.25+ (or a Go installation compatible with automatic toolchain selection). The default Docker path also needs a running Docker daemon. Run the prerequisite check before creating the cluster.
-
-Each minikube node defaults to 2 CPUs and 4 GiB of memory. Adding a node increases host CPU, memory, and disk consumption. On a smaller lecture machine, set `MINIKUBE_CPUS` and `MINIKUBE_MEMORY`; the pressure script sizes CPU requests from the node capacity reported by Kubernetes.
-
-## Manual lecture flow
-
-Use two terminals from the repository root. The provider intentionally remains in the foreground so the RPC and `minikube node add` evidence stays visible.
+### Run
 
 Terminal 1:
 
 ```sh
-./scripts/00-check-prereqs.sh
 ./scripts/01-start-minikube.sh
 ./scripts/02-run-provider.sh
 ```
@@ -76,109 +210,69 @@ Terminal 2, after the provider is listening:
 ./scripts/05-watch-demo.sh
 ```
 
-To demonstrate decisions without changing minikube, replace the final Terminal 1 command with:
+Expected real-mode sequence:
+
+1. pressure Pods become `Pending`;
+2. Cluster Autoscaler creates a `minikube-workers 1 -> 2` scale-up plan;
+3. the provider receives the request and executes `minikube node add`;
+4. a second node becomes `Ready`;
+5. all pressure Pods become `Running`.
+
+### Dry-run
+
+Start the provider with:
 
 ```sh
 ./scripts/02-run-provider.sh --dry-run
 ```
 
-Dry-run proves only that CA calls the provider. The provider emits `scale-up request group=minikube-workers ... dry-run=true` and `scale-up succeeded ... dry-run=true`; it emits no minikube command and adds no node, so the pressure Pods stay `Pending`.
+Cluster Autoscaler can still call the provider, but no minikube command is executed and no node is added. Provider logs include `dry-run=true`; pressure Pods remain `Pending`.
 
-In real mode, expected evidence is, in order:
+### Demo configuration
 
-1. At least one pressure Pod becomes `Pending`.
-2. CA logs show an unschedulable Pod and a scale-up decision.
-3. Provider logs show `scale-up request group=minikube-workers ... dry-run=false`.
-4. The command log shows `exec: minikube ["node" "add" "-p" "autoscaling-demo"]`.
-5. Provider logs show `scale-up succeeded ... dry-run=false`.
-6. `kubectl` shows a second node becoming `Ready`.
-7. Pressure Pods become `Running`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROFILE` | `autoscaling-demo` | Dedicated disposable minikube profile and kubectl context. |
+| `MINIKUBE_DRIVER` | `docker` | minikube driver; Docker is tested. |
+| `MINIKUBE_CNI` | `flannel` | CNI that configures workers added at runtime. |
+| `KUBERNETES_VERSION` | `v1.35.6` | minikube Kubernetes version. |
+| `CA_VERSION` | `v1.35.0` | Cluster Autoscaler image tag. |
+| `MIN_NODES` | `1` | Provider node-group minimum. |
+| `MAX_NODES` | `3` | Provider node-group maximum. |
+| `MINIKUBE_CPUS` | `2` | Requested CPUs per minikube node. |
+| `MINIKUBE_MEMORY` | `4g` | Requested memory per minikube node. |
 
-Useful inspection commands:
+### Inspect
 
 ```sh
 kubectl --context autoscaling-demo get nodes -w
 kubectl --context autoscaling-demo get pods -A -o wide
 kubectl --context autoscaling-demo get pods -A --field-selector=status.phase=Pending
 kubectl --context autoscaling-demo -n kube-system logs -f deployment/cluster-autoscaler
-kubectl --context autoscaling-demo describe deployment/autoscaler-pressure
 kubectl --context autoscaling-demo get events -A --sort-by=.lastTimestamp
 ```
 
-## Configuration
+### Troubleshooting
 
-Scripts read these environment variables:
+- **Version mismatch:** update Kubernetes, Cluster Autoscaler, and the externalgrpc bindings together.
+- **Provider unreachable:** confirm port 9090 is free, the provider listens on `0.0.0.0`, and `host.minikube.internal:9090` is reachable.
+- **No scale-up:** inspect Cluster Autoscaler logs and Pending Pod events; confirm the provider remains running.
+- **Worker remains `NotReady`:** use the default flannel CNI or another CNI that configures nodes added at runtime.
+- **No Pending Pods:** inspect allocatable CPU; `04-create-pressure.sh` adjusts requests from the first node.
+- **Host resource failure:** free Docker resources or reduce `MINIKUBE_CPUS` and `MINIKUBE_MEMORY`.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PROFILE` | `autoscaling-demo` | dedicated disposable minikube profile and kubectl context |
-| `MINIKUBE_DRIVER` | `docker` | minikube driver; Docker is tested |
-| `MINIKUBE_CNI` | `flannel` | CNI that configures workers added at runtime |
-| `KUBERNETES_VERSION` | `v1.35.6` | minikube Kubernetes version |
-| `CA_VERSION` | `v1.35.0` | Cluster Autoscaler image tag |
-| `MIN_NODES` | `1` | provider node-group minimum |
-| `MAX_NODES` | `3` | provider node-group maximum |
-| `MINIKUBE_CPUS` | `2` | CPUs per minikube node |
-| `MINIKUBE_MEMORY` | `4g` | memory per minikube node |
+### Cleanup
 
-`./scripts/02-run-provider.sh` forwards extra arguments to the provider. Its CLI flags are:
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--listen` | `0.0.0.0:9090` | gRPC listen address; all interfaces are needed for host reachability |
-| `--profile` | `autoscaling-demo` | minikube profile |
-| `--node-group` | `minikube-workers` | single node-group ID |
-| `--min-nodes` | `1` | minimum node count |
-| `--max-nodes` | `3` | maximum node count |
-| `--dry-run` | `false` | simulate increases without adding nodes |
-| `--enable-scale-down` | `false` | expose the future scale-down boundary |
-| `--v` | `1` | accepted, parsed, and reported; didactic operation logs are currently unconditional |
-
-## Automated verification
-
-These checks do not run the live demo:
-
-```sh
-make test
-make race
-make vet
-make build
-for script in scripts/*.sh proto/generate.sh; do sh -n "$script"; done
-```
-
-`make test` runs the Go unit tests and all three shell regression checks. Use `make shell-test` to run only the shell checks.
-
-When a Kubernetes cluster is connected, validate the manifests without applying them:
-
-```sh
-kubectl apply --dry-run=client -f deploy/cluster-autoscaler-rbac.yaml
-kubectl apply --dry-run=client -f deploy/cloud-config.yaml
-kubectl apply --dry-run=client -f deploy/cluster-autoscaler.yaml
-kubectl apply --dry-run=client -f deploy/workload-unschedulable.yaml
-```
-
-## Troubleshooting
-
-- **Version mismatch:** export `KUBERNETES_VERSION` and `CA_VERSION` together with the same major/minor, then rerun `./scripts/00-check-prereqs.sh`.
-- **Docker or resource failure:** verify `docker info`, free host resources, or lower `MINIKUBE_CPUS`/`MINIKUBE_MEMORY`. Remember that every added node consumes more host resources.
-- **Port 9090 or host reachability:** ensure nothing else owns port 9090. The provider must bind `0.0.0.0:9090`, not loopback, so `host.minikube.internal:9090` is reachable. `./scripts/03-deploy-cluster-autoscaler.sh` performs a best-effort probe.
-- **No scale-up:** inspect CA logs and Pending Pod events with the commands above. Confirm the provider is still running in Terminal 1.
-- **No Pending Pod, or Pods never fit:** inspect the allocatable CPU reported by `kubectl get nodes`; the pressure script sizes each request to one third of the first node.
-
-## Cleanup
-
-Stop the foreground provider with Ctrl-C, then run:
+Stop the foreground provider with `Ctrl-C`, then run:
 
 ```sh
 ./scripts/99-cleanup.sh
 ```
 
-This deletes the entire selected `PROFILE` and every workload in it, not just resources created by the demo. Use only the dedicated disposable profile described above.
+This removes the entire selected `PROFILE`, not only the resources created by the scripts.
 
-## TODO: future scale-down
+## Scale-down status
 
-Scale-down is not implemented. Even with `--enable-scale-down=true`, delete and decrease RPCs currently return gRPC `Unimplemented`.
+Scale-down is intentionally not implemented. With the default configuration, delete and decrease RPCs return `FailedPrecondition`. With `--enable-scale-down=true`, they return `Unimplemented`.
 
-A safe implementation must map Kubernetes node names to minikube node identities, validate removal, cordon and drain, then call `minikube node delete`. It must deliberately handle DaemonSets, local storage, PodDisruptionBudgets, and non-evictable Pods before removing capacity.
-
-No live end-to-end result is claimed by this repository documentation; run the manual flow on the lecture machine to collect it.
+A future implementation must map Kubernetes nodes to minikube identities, validate removals, cordon and drain safely, invoke `minikube node delete`, and handle DaemonSets, local storage, PodDisruptionBudgets, and non-evictable Pods.

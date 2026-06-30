@@ -9,6 +9,7 @@ import datetime
 import json
 import math
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -20,6 +21,23 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+
+ANSI_ESCAPE = re.compile(
+    r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|[PX^_].*?\x1b\\|\[[0-?]*[ -/]*[@-~]|[@-_])"
+    r"|\x9b[0-?]*[ -/]*[@-~]",
+    re.DOTALL,
+)
+
+
+def sanitize(value):
+    text = ANSI_ESCAPE.sub("", str(value))
+    return "".join(
+        " " if character in "\t\r\n" else character
+        for character in text
+        if character in "\t\r\n"
+        or (ord(character) >= 32 and not 127 <= ord(character) <= 159)
+    )
 
 
 def run_command(args):
@@ -114,7 +132,11 @@ def collect_snapshot(profile, runner=run_command, probe=provider_reachable):
 
 
 def infer_phase(previous, current):
-    if previous is not None:
+    if (
+        previous is not None
+        and "nodes" not in previous.get("errors", {})
+        and "nodes" not in current.get("errors", {})
+    ):
         node_change = len(current["nodes"]) - len(previous["nodes"])
         if node_change > 0:
             return "SCALING UP"
@@ -151,7 +173,7 @@ def nodes_table(snapshot):
         table.add_column(heading)
     error = snapshot["errors"].get("nodes")
     if error:
-        table.add_row(Text(f"Error: {error}", style="red"), "", "", "", "")
+        table.add_row(Text(f"Error: {sanitize(error)}", style="red"), "", "", "", "")
     elif not snapshot["nodes"]:
         table.add_row(Text("No nodes found", style="dim"), "", "", "", "")
     for node in snapshot["nodes"]:
@@ -163,10 +185,10 @@ def nodes_table(snapshot):
             "Unknown",
         )
         table.add_row(
-            Text(str(metadata.get("name", "-"))),
+            Text(sanitize(metadata.get("name", "-"))),
             Text(role),
             Text("Yes" if ready == "True" else "No", style="green" if ready == "True" else "red"),
-            Text(str(node.get("status", {}).get("allocatable", {}).get("cpu", "-"))),
+            Text(sanitize(node.get("status", {}).get("allocatable", {}).get("cpu", "-"))),
             Text(object_age(metadata)),
         )
     return Panel(table, title="NODES", border_style="cyan")
@@ -178,16 +200,16 @@ def pods_table(snapshot):
         table.add_column(heading)
     error = snapshot["errors"].get("pods")
     if error:
-        table.add_row(Text(f"Error: {error}", style="red"), "", "")
+        table.add_row(Text(f"Error: {sanitize(error)}", style="red"), "", "")
     elif not snapshot["pods"]:
         table.add_row(Text("No pressure Pods found", style="dim"), "", "")
     for pod in snapshot["pods"]:
         metadata = pod.get("metadata", {})
-        phase = str(pod.get("status", {}).get("phase", "Unknown"))
+        phase = sanitize(pod.get("status", {}).get("phase", "Unknown"))
         table.add_row(
-            Text(str(metadata.get("name", "-"))),
+            Text(sanitize(metadata.get("name", "-"))),
             Text(phase, style="green" if phase == "Running" else "yellow" if phase == "Pending" else "red"),
-            Text(str(pod.get("spec", {}).get("nodeName", "-"))),
+            Text(sanitize(pod.get("spec", {}).get("nodeName", "-"))),
         )
     return Panel(table, title="WORKLOAD PODS", border_style="cyan")
 
@@ -195,7 +217,7 @@ def pods_table(snapshot):
 def summary_panel(snapshot, phase):
     phases = {}
     for pod in snapshot["pods"]:
-        pod_phase = str(pod.get("status", {}).get("phase", "Unknown"))
+        pod_phase = sanitize(pod.get("status", {}).get("phase", "Unknown"))
         phases[pod_phase] = phases.get(pod_phase, 0) + 1
     pod_counts = ", ".join(f"{name}: {count}" for name, count in sorted(phases.items())) or "none"
     provider = "reachable" if snapshot.get("provider_reachable") else "unreachable"
@@ -216,9 +238,9 @@ def summary_panel(snapshot, phase):
 def decisions_panel(snapshot):
     error = snapshot["errors"].get("decisions")
     if error:
-        content = Text(f"Error: {error}", style="red")
+        content = Text(f"Error: {sanitize(error)}", style="red")
     elif snapshot["decisions"]:
-        content = Group(*(Text(str(line)) for line in snapshot["decisions"]))
+        content = Group(*(Text(sanitize(line)) for line in snapshot["decisions"]))
     else:
         content = Text("No recent autoscaler decisions", style="dim")
     return Panel(content, title="AUTOSCALER DECISIONS", border_style="cyan")
@@ -227,7 +249,7 @@ def decisions_panel(snapshot):
 def events_panel(snapshot):
     error = snapshot["errors"].get("events")
     if error:
-        content = Text(f"Error: {error}", style="red")
+        content = Text(f"Error: {sanitize(error)}", style="red")
     elif snapshot["events"]:
         lines = []
         for event in snapshot["events"]:
@@ -235,7 +257,9 @@ def events_panel(snapshot):
             timestamp = event.get("eventTime") or event.get("lastTimestamp") or metadata.get("creationTimestamp", "-")
             reason = event.get("reason", "-")
             message = event.get("message", "-")
-            lines.append(Text(f"{timestamp}  {reason}  {message}"))
+            lines.append(
+                Text(f"{sanitize(timestamp)}  {sanitize(reason)}  {sanitize(message)}")
+            )
         content = Group(*lines)
     else:
         content = Text("No recent Kubernetes events", style="dim")
@@ -246,16 +270,17 @@ def build_screen(snapshot, previous, profile, interval):
     phase = infer_phase(previous, snapshot)
     layout = Layout()
     layout.split_column(
-        Layout(name="header", size=3),
+        Layout(name="header", size=5),
         Layout(name="top", size=7),
-        Layout(name="middle", size=7),
-        Layout(name="events", size=5),
+        Layout(name="middle", size=6),
+        Layout(name="events", size=3),
         Layout(name="footer", size=3),
     )
     layout["top"].split_row(Layout(name="nodes"), Layout(name="summary"))
     layout["middle"].split_row(Layout(name="pods"), Layout(name="decisions"))
     header = Text("minikube-cluster-scaler observer", style="bold cyan")
-    header.append(f"  profile={profile}  phase={phase}  {snapshot['collected_at']}")
+    header.append(f"\nprofile={sanitize(profile)}  phase={phase}")
+    header.append(f"\ntimestamp={sanitize(snapshot['collected_at'])}")
     layout["header"].update(Panel(header))
     layout["nodes"].update(nodes_table(snapshot))
     layout["summary"].update(summary_panel(snapshot, phase))

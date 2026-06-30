@@ -164,7 +164,7 @@ esac
 
     def test_build_screen_renders_observer_state(self):
         output = StringIO()
-        console = Console(file=output, width=140, color_system=None)
+        console = Console(file=output, width=140, height=24, color_system=None)
 
         console.print(
             watch_demo.build_screen(
@@ -186,6 +186,72 @@ esac
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
+        self.assertTrue(text.rstrip().endswith("╯"), "footer must fit a 24-row terminal")
+
+    def test_header_keeps_context_phase_and_timestamp_at_80_columns(self):
+        output = StringIO()
+        console = Console(file=output, width=80, height=24, color_system=None)
+
+        console.print(
+            watch_demo.build_screen(
+                SNAPSHOT_TWO_NODES, SNAPSHOT_ONE_NODE, "demo", 2.0
+            )
+        )
+
+        text = output.getvalue()
+        self.assertIn("profile=demo", text)
+        self.assertIn("phase=SCALING UP", text)
+        self.assertIn("timestamp=2026-06-30T10:00:00+00:00", text)
+
+    def test_build_screen_sanitizes_external_control_sequences(self):
+        snapshot = {
+            **SNAPSHOT_TWO_NODES,
+            "nodes": [
+                {
+                    **SNAPSHOT_TWO_NODES["nodes"][1],
+                    "metadata": {
+                        **SNAPSHOT_TWO_NODES["nodes"][1]["metadata"],
+                        "name": "demo\x08-m02",
+                    },
+                }
+            ],
+            "pods": [
+                {
+                    "metadata": {"name": "pressure\x7f-1"},
+                    "spec": {"nodeName": "demo\x08-m02"},
+                    "status": {"phase": "Running\x00"},
+                }
+            ],
+            "events": [
+                {
+                    "lastTimestamp": "2026-06-30T10:00:00Z\x01",
+                    "reason": "\x1b]0;owned\x07TriggeredScaleUp",
+                    "message": "node added\x9b31m\x02",
+                }
+            ],
+            "decisions": ["\x1b[31mscale decision\x1b[0m\x00"],
+        }
+        output = StringIO()
+        console = Console(file=output, width=140, height=24, color_system=None)
+
+        console.print(
+            watch_demo.build_screen(
+                snapshot, SNAPSHOT_ONE_NODE, "\x1b[2Jdemo\x07", 2.0
+            )
+        )
+
+        text = output.getvalue()
+        self.assertIn("profile=demo", text)
+        self.assertIn("scale decision", text)
+        self.assertIn("TriggeredScaleUp", text)
+        self.assertNotIn("\x1b", text)
+        self.assertFalse(
+            any(
+                (ord(character) < 32 and character != "\n")
+                or 127 <= ord(character) <= 159
+                for character in text
+            )
+        )
 
     def test_build_screen_keeps_nodes_when_events_fail(self):
         snapshot = {
@@ -373,6 +439,16 @@ esac
         for previous, current, expected in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(watch_demo.infer_phase(previous, current), expected)
+
+    def test_infer_phase_ignores_node_change_when_collection_failed(self):
+        previous = {"nodes": [{}, {}], "pods": [], "errors": {}}
+        current = {
+            "nodes": [],
+            "pods": [],
+            "errors": {"nodes": "kubectl timed out"},
+        }
+
+        self.assertEqual(watch_demo.infer_phase(previous, current), "STABLE")
 
 
 if __name__ == "__main__":

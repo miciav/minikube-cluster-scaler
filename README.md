@@ -2,13 +2,14 @@
 
 `minikube-cluster-scaler` is a host-side implementation of the official Kubernetes Cluster Autoscaler [`externalgrpc`](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/cloudprovider/externalgrpc) cloud-provider API.
 
-It exposes a single minikube node group over gRPC and translates scale-up requests into:
+It exposes a single minikube node group over gRPC and translates capacity requests into:
 
 ```sh
 minikube node add -p <profile>
+minikube node delete <node-name> -p <profile>
 ```
 
-> **Demonstration only — not for production.** The provider has no authentication or TLS, exposes a plaintext gRPC endpoint, models only one node group, and does not implement scale-down.
+> **Demonstration only — not for production.** The provider has no authentication or TLS, exposes a plaintext gRPC endpoint, models only one node group, and can delete minikube workers from the selected profile.
 
 ## Provider architecture
 
@@ -22,9 +23,9 @@ host.minikube.internal:9090
         v
 minikube-cluster-scaler on the host
         |                         |
-        | kubectl get nodes       | minikube node add
+        | kubectl get nodes       | minikube node add/delete
         v                         v
-observed node-group state     new minikube worker
+observed node-group state     minikube workers
 ```
 
 Cluster Autoscaler retains all scheduling and autoscaling logic. This provider implements only the cloud-provider boundary required to observe and resize local minikube capacity.
@@ -40,14 +41,16 @@ Cluster Autoscaler retains all scheduling and autoscaling logic. This provider i
 | `NodeGroupNodes` | Returns the known running instances. |
 | `NodeGroupIncreaseSize` | Enforces bounds and executes one `minikube node add` per requested node. |
 | `NodeGroupTemplateNodeInfo` | Returns a protobuf-encoded worker template derived from the current node's allocatable resources. |
-| `NodeGroupDeleteNodes` | Returns `FailedPrecondition` while scale-down is disabled. |
-| `NodeGroupDecreaseTargetSize` | Returns `FailedPrecondition` while scale-down is disabled. |
+| `NodeGroupDeleteNodes` | Deletes exactly one validated worker by Kubernetes name or ProviderID, subject to minimum-size and control-plane protection. |
+| `NodeGroupDecreaseTargetSize` | Returns `FailedPrecondition` while scale-down is disabled and `Unimplemented` when enabled. |
 | `GPULabel`, `GetAvailableGPUTypes`, `Cleanup` | Return minimal successful responses. |
 | Pricing and node-group options | Remain officially `Unimplemented`. |
 
-Scale-up operations are serialized. Before changing capacity, the provider refreshes the observed nodes and checks the configured maximum. After every successful node addition it refreshes state again. Caller cancellation is propagated through gRPC, while command failures include stdout and stderr.
+Capacity operations are serialized. Before changing capacity, the provider refreshes the observed nodes and checks the configured bounds. After every successful real node addition or deletion it refreshes state again. Caller cancellation is propagated through gRPC, while command failures include stdout and stderr.
 
-The initial minikube node can act as both control plane and worker. It is counted as the first group member; nodes added later are worker-only. This deliberate simplification is safe for the implemented scale-up-only workflow.
+The initial minikube node can act as both control plane and worker. It is counted as the first group member; nodes added later are worker-only. Scale-down rejects deletion of the control-plane node and any deletion that would reduce the group below `--min-nodes`.
+
+`NodeGroupDeleteNodes` accepts exactly one node per request. It resolves the externalgrpc node from either `Name` or `ProviderID`, rejects unknown nodes and the control-plane node, and executes `minikube node delete <node-name> -p <profile>` in real mode. Dry-run mode updates only the provider's simulated node list and target size; all validation and protection rules still apply.
 
 ## Build and run the provider
 
@@ -85,8 +88,8 @@ make build
 | `--node-group` | `minikube-workers` | Node-group ID exposed to Cluster Autoscaler. |
 | `--min-nodes` | `1` | Minimum accepted group size. |
 | `--max-nodes` | `3` | Maximum accepted group size. |
-| `--dry-run` | `false` | Simulates target changes without invoking `minikube node add`. |
-| `--enable-scale-down` | `false` | Exposes the future scale-down boundary; removal remains unimplemented. |
+| `--dry-run` | `false` | Simulates target changes without invoking minikube add or delete commands. |
+| `--enable-scale-down` | `false` | Enables validated worker deletion through `NodeGroupDeleteNodes`. |
 | `--v` | `1` | Accepted and reported; operation logs are currently unconditional. |
 
 Typical scale-up logs are intentionally explicit:
@@ -111,7 +114,10 @@ Required Cluster Autoscaler arguments:
 ```text
 --cloud-provider=externalgrpc
 --cloud-config=/etc/cluster-autoscaler/cloud-config.yaml
---scale-down-enabled=false
+--scale-down-enabled=true
+--max-scale-down-parallelism=1
+--scale-down-delay-after-add=$(SCALE_DOWN_DELAY_AFTER_ADD)
+--scale-down-unneeded-time=$(SCALE_DOWN_UNNEEDED_TIME)
 ```
 
 The provider must listen on `0.0.0.0`, not only `127.0.0.1`, because the Cluster Autoscaler Pod reaches the host through `host.minikube.internal`.
@@ -161,7 +167,7 @@ for script in scripts/*.sh deploy/*_test.sh proto/generate.sh; do
 done
 ```
 
-## Minikube scale-up demo
+## Minikube scale-up and scale-down demo
 
 The repository contains a complete local scenario:
 
@@ -179,6 +185,9 @@ minikube node add
     |
     v
 new Ready worker -> Pending Pods become Running
+    |
+    v
+remove pressure -> minikube node delete -> protected control plane remains
 ```
 
 Always use a dedicated, disposable `PROFILE`. The cleanup script deletes the entire selected minikube profile and every workload in it.
@@ -218,6 +227,20 @@ Expected real-mode sequence:
 4. a second node becomes `Ready`;
 5. all pressure Pods become `Running`.
 
+Remove the pressure workload:
+
+```sh
+./scripts/06-remove-pressure.sh
+```
+
+Cluster Autoscaler selects one unneeded worker at a time, and the provider validates and applies repeated `N -> N-1` deletions. The sequence stops at one Ready node because both the configured minimum and the control-plane label protect the initial node.
+
+To run the complete `1 -> 2 -> 1` check in a disposable profile:
+
+```sh
+./scripts/e2e-scale-down.sh
+```
+
 ### Dry-run
 
 Start the provider with:
@@ -226,7 +249,7 @@ Start the provider with:
 ./scripts/02-run-provider.sh --dry-run
 ```
 
-Cluster Autoscaler can still call the provider, but no minikube command is executed and no node is added. Provider logs include `dry-run=true`; pressure Pods remain `Pending`.
+Cluster Autoscaler can still call the provider, but no minikube command is executed. Provider logs include `dry-run=true`; scale-up and scale-down update only simulated provider state.
 
 ### Demo configuration
 
@@ -239,6 +262,9 @@ Cluster Autoscaler can still call the provider, but no minikube command is execu
 | `CA_VERSION` | `v1.35.0` | Cluster Autoscaler image tag. |
 | `MIN_NODES` | `1` | Provider node-group minimum. |
 | `MAX_NODES` | `3` | Provider node-group maximum. |
+| `ENABLE_SCALE_DOWN` | `true` | Script setting passed to the provider's `--enable-scale-down` flag. |
+| `SCALE_DOWN_DELAY_AFTER_ADD` | `1m` | Delay before Cluster Autoscaler considers scale-down after adding a node. |
+| `SCALE_DOWN_UNNEEDED_TIME` | `1m` | Time a node must remain unneeded before scale-down. |
 | `MINIKUBE_CPUS` | `2` | Requested CPUs per minikube node. |
 | `MINIKUBE_MEMORY` | `4g` | Requested memory per minikube node. |
 
@@ -257,6 +283,7 @@ kubectl --context autoscaling-demo get events -A --sort-by=.lastTimestamp
 - **Version mismatch:** update Kubernetes, Cluster Autoscaler, and the externalgrpc bindings together.
 - **Provider unreachable:** confirm port 9090 is free, the provider listens on `0.0.0.0`, and `host.minikube.internal:9090` is reachable.
 - **No scale-up:** inspect Cluster Autoscaler logs and Pending Pod events; confirm the provider remains running.
+- **No scale-down:** confirm `ENABLE_SCALE_DOWN=true`, remove the pressure workload, and inspect Cluster Autoscaler and provider logs.
 - **Worker remains `NotReady`:** use the default flannel CNI or another CNI that configures nodes added at runtime.
 - **No Pending Pods:** inspect allocatable CPU; `04-create-pressure.sh` adjusts requests from the first node.
 - **Host resource failure:** free Docker resources or reduce `MINIKUBE_CPUS` and `MINIKUBE_MEMORY`.
@@ -271,8 +298,8 @@ Stop the foreground provider with `Ctrl-C`, then run:
 
 This removes the entire selected `PROFILE`, not only the resources created by the scripts.
 
-## Scale-down status
+## Scale-down limits
 
-Scale-down is intentionally not implemented. With the default configuration, delete and decrease RPCs return `FailedPrecondition`. With `--enable-scale-down=true`, they return `Unimplemented`.
+`NodeGroupDeleteNodes` implements the externalgrpc deletion boundary for this local demo. It accepts one observed worker by `Name` or `ProviderID`, protects the control plane and minimum size, and confirms real deletions through a fresh Kubernetes observation. Cluster Autoscaler remains responsible for deciding that a node is unneeded and for its normal eviction checks.
 
-A future implementation must map Kubernetes nodes to minikube identities, validate removals, cordon and drain safely, invoke `minikube node delete`, and handle DaemonSets, local storage, PodDisruptionBudgets, and non-evictable Pods.
+`NodeGroupDecreaseTargetSize` remains `Unimplemented` when scale-down is enabled because minikube node creation is synchronous: there is no requested-but-unprovisioned capacity to cancel. This narrow implementation does not make the plaintext, single-group host provider suitable for production.

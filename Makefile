@@ -8,6 +8,7 @@ shell-test:
 	./scripts/03-deploy-cluster-autoscaler_test.sh
 	./scripts/04-create-pressure_test.sh
 	./scripts/06-remove-pressure_test.sh
+	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 
 race:

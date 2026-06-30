@@ -29,11 +29,19 @@ spec:
             limits:
               cpu: 100m
               memory: 300Mi
+          env:
+            - name: SCALE_DOWN_DELAY_AFTER_ADD
+              value: 1m
+            - name: SCALE_DOWN_UNNEEDED_TIME
+              value: 1m
           command:
             - ./cluster-autoscaler
             - --cloud-provider=externalgrpc
             - --cloud-config=/etc/cluster-autoscaler/cloud-config.yaml
-            - --scale-down-enabled=false
+            - --scale-down-enabled=true
+            - --max-scale-down-parallelism=1
+            - --scale-down-delay-after-add=$(SCALE_DOWN_DELAY_AFTER_ADD)
+            - --scale-down-unneeded-time=$(SCALE_DOWN_UNNEEDED_TIME)
             - --v=5
           volumeMounts:
             # Plaintext is intentional for this local teaching demo.

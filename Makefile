@@ -5,6 +5,7 @@ test: shell-test
 
 shell-test:
 	./scripts/01-start-minikube_test.sh
+	./scripts/03-deploy-cluster-autoscaler_test.sh
 	./scripts/04-create-pressure_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 

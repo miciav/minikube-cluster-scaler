@@ -5,11 +5,14 @@
 # ///
 
 import importlib.util
+from io import StringIO
 import json
 import pathlib
 import subprocess
 import unittest
 from unittest.mock import patch
+
+from rich.console import Console
 
 
 MODULE_PATH = pathlib.Path(__file__).with_name("05-watch-demo.py")
@@ -18,7 +21,135 @@ watch_demo = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(watch_demo)
 
 
+SNAPSHOT_ONE_NODE = {
+    "nodes": [
+        {
+            "metadata": {
+                "name": "demo",
+                "creationTimestamp": "2026-06-30T08:00:00Z",
+                "labels": {"node-role.kubernetes.io/control-plane": ""},
+            },
+            "status": {
+                "allocatable": {"cpu": "4"},
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+    ],
+    "pods": [
+        {
+            "metadata": {"name": "pressure-1", "namespace": "default"},
+            "spec": {"nodeName": "demo"},
+            "status": {"phase": "Running"},
+        },
+        {
+            "metadata": {"name": "pressure-2", "namespace": "default"},
+            "spec": {},
+            "status": {"phase": "Pending"},
+        },
+    ],
+    "events": [],
+    "decisions": [],
+    "provider_reachable": True,
+    "errors": {},
+    "collected_at": "2026-06-30T10:00:00+00:00",
+}
+
+SNAPSHOT_TWO_NODES = {
+    **SNAPSHOT_ONE_NODE,
+    "nodes": [
+        *SNAPSHOT_ONE_NODE["nodes"],
+        {
+            "metadata": {
+                "name": "demo-m02",
+                "creationTimestamp": "2026-06-30T09:59:00Z",
+                "labels": {"node-role.kubernetes.io/worker": ""},
+            },
+            "status": {
+                "allocatable": {"cpu": "2"},
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        },
+    ],
+    "pods": [
+        *SNAPSHOT_ONE_NODE["pods"],
+        {
+            "metadata": {"name": "pressure-3", "namespace": "default"},
+            "spec": {"nodeName": "demo-m02"},
+            "status": {"phase": "Running"},
+        },
+        {
+            "metadata": {"name": "pressure-4", "namespace": "default"},
+            "spec": {"nodeName": "demo-m02"},
+            "status": {"phase": "Running"},
+        },
+    ],
+    "events": [
+        {
+            "metadata": {"name": "scaled-up", "namespace": "kube-system"},
+            "lastTimestamp": "2026-06-30T10:00:00Z",
+            "reason": "TriggeredScaleUp",
+            "message": "pod triggered scale-up: [{minikube 1->2}]",
+        }
+    ],
+    "decisions": ["Scale-up: setting group size to 2"],
+}
+
+
 class WatchDemoTest(unittest.TestCase):
+    def test_positive_float_rejects_nonfinite_and_nonpositive_values(self):
+        for value in ("nan", "inf", "-inf", "0", "-1"):
+            with self.subTest(value=value), self.assertRaises(
+                watch_demo.argparse.ArgumentTypeError
+            ):
+                watch_demo.positive_float(value)
+
+    def test_keyboard_interrupt_during_initial_collection_exits_zero(self):
+        with (
+            patch.object(watch_demo.sys.stdout, "isatty", return_value=True),
+            patch.object(watch_demo, "collect_snapshot", side_effect=KeyboardInterrupt),
+        ):
+            self.assertEqual(watch_demo.main([]), 0)
+
+    def test_build_screen_renders_observer_state(self):
+        output = StringIO()
+        console = Console(file=output, width=140, color_system=None)
+
+        console.print(
+            watch_demo.build_screen(
+                SNAPSHOT_TWO_NODES, SNAPSHOT_ONE_NODE, "demo", 2.0
+            )
+        )
+
+        text = output.getvalue()
+        for expected in (
+            "minikube-cluster-scaler observer",
+            "NODES",
+            "SUMMARY",
+            "WORKLOAD PODS",
+            "AUTOSCALER DECISIONS",
+            "KUBERNETES EVENTS",
+            "demo-m02",
+            "SCALING UP",
+            "read-only",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
+    def test_build_screen_keeps_nodes_when_events_fail(self):
+        snapshot = {
+            **SNAPSHOT_TWO_NODES,
+            "events": [],
+            "errors": {"events": "invalid JSON"},
+        }
+        output = StringIO()
+        console = Console(file=output, width=140, color_system=None)
+
+        console.print(watch_demo.build_screen(snapshot, SNAPSHOT_ONE_NODE, "demo", 2.0))
+
+        text = output.getvalue()
+        self.assertIn("demo-m02", text)
+        self.assertIn("invalid JSON", text)
+
     def test_run_command_uses_safe_bounded_subprocess(self):
         completed = subprocess.CompletedProcess(["kubectl"], 0, stdout="ok\n")
         with patch.object(watch_demo.subprocess, "run", return_value=completed) as run:

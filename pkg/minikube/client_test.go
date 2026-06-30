@@ -45,6 +45,22 @@ func TestAddNodeUsesArgumentArray(t *testing.T) {
 	}
 }
 
+func TestDeleteNodeUsesArgumentArray(t *testing.T) {
+	var gotName string
+	var gotArgs []string
+	c := New("demo", time.Second, nil, func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+		gotName, gotArgs = name, args
+		return nil, nil, nil
+	})
+
+	if err := c.DeleteNode(context.Background(), "demo-m02"); err != nil {
+		t.Fatal(err)
+	}
+	if gotName != "minikube" || !slices.Equal(gotArgs, []string{"node", "delete", "demo-m02", "-p", "demo"}) {
+		t.Fatalf("command = %s %v", gotName, gotArgs)
+	}
+}
+
 func TestCommandFailureIncludesOutputAndWrapsCause(t *testing.T) {
 	cause := errors.New("exit 1")
 	c := New("demo", time.Second, nil, func(context.Context, string, ...string) ([]byte, []byte, error) {

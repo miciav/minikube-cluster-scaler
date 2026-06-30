@@ -50,6 +50,11 @@ func (c *Client) AddNode(ctx context.Context) error {
 	return err
 }
 
+func (c *Client) DeleteNode(ctx context.Context, name string) error {
+	_, err := c.exec(ctx, "minikube", "node", "delete", name, "-p", c.profile)
+	return err
+}
+
 func (c *Client) exec(parent context.Context, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()

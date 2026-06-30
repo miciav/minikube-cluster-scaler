@@ -5,7 +5,7 @@ MINIKUBE_DRIVER=${MINIKUBE_DRIVER:-docker}
 KUBERNETES_VERSION=${KUBERNETES_VERSION:-v1.35.6}
 CA_VERSION=${CA_VERSION:-v1.35.0}
 
-for command in minikube kubectl go; do
+for command in minikube kubectl go uv; do
   if ! command -v "$command" >/dev/null 2>&1; then
     printf 'error: required command not found: %s\n' "$command" >&2
     exit 1

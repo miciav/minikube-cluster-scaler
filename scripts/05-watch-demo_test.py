@@ -7,8 +7,11 @@
 import importlib.util
 from io import StringIO
 import json
+import os
 import pathlib
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +19,7 @@ from rich.console import Console
 
 
 MODULE_PATH = pathlib.Path(__file__).with_name("05-watch-demo.py")
+sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("watch_demo", MODULE_PATH)
 watch_demo = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(watch_demo)
@@ -96,6 +100,54 @@ SNAPSHOT_TWO_NODES = {
 
 
 class WatchDemoTest(unittest.TestCase):
+    def test_script_is_executable_and_declares_rich(self):
+        source = MODULE_PATH.read_text()
+        self.assertTrue(os.access(MODULE_PATH, os.X_OK))
+        self.assertIn('dependencies = ["rich>=14,<15"]', source)
+
+    def test_once_runs_through_uv_with_fake_kubectl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            calls = directory / "calls"
+            kubectl = directory / "kubectl"
+            kubectl.write_text(
+                """#!/bin/sh
+printf '%s\\n' "$*" >> "$KUBECTL_CALLS"
+case "$*" in
+  *" get nodes "*) printf '%s\\n' '{"items":[{"metadata":{"name":"n1","labels":{"node-role.kubernetes.io/control-plane":""}},"status":{"allocatable":{"cpu":"2"},"conditions":[{"type":"Ready","status":"True"}]}}]}' ;;
+  *" get pods "*|*" get events "*) printf '%s\\n' '{"items":[]}' ;;
+  *" logs "*) printf '%s\\n' 'scale decision from fake kubectl' ;;
+  *) exit 64 ;;
+esac
+"""
+            )
+            kubectl.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{directory}{os.pathsep}{env['PATH']}"
+            env["KUBECTL_CALLS"] = str(calls)
+
+            completed = subprocess.run(
+                ["uv", "run", "--script", str(MODULE_PATH), "--profile", "fake", "--once"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("minikube-cluster-scaler observer", completed.stdout)
+            self.assertIn("n1", completed.stdout)
+            self.assertEqual(
+                calls.read_text().splitlines(),
+                [
+                    "--context fake get nodes -o json",
+                    "--context fake get pods -A -o json",
+                    "--context fake get events -A -o json",
+                    "--context fake -n kube-system logs deployment/cluster-autoscaler --tail=40",
+                ],
+            )
+
     def test_positive_float_rejects_nonfinite_and_nonpositive_values(self):
         for value in ("nan", "inf", "-inf", "0", "-1"):
             with self.subTest(value=value), self.assertRaises(

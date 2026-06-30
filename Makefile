@@ -1,6 +1,6 @@
-.PHONY: test shell-test race vet build generate check start provider deploy pressure watch remove-pressure cleanup
+.PHONY: test shell-test tui-test race vet build generate check start provider deploy pressure watch remove-pressure cleanup
 
-test: shell-test
+test: shell-test tui-test
 	go test ./...
 
 shell-test:
@@ -10,6 +10,9 @@ shell-test:
 	./scripts/06-remove-pressure_test.sh
 	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
+
+tui-test:
+	uv run --script scripts/05-watch-demo_test.py
 
 race:
 	go test -race ./...
@@ -39,7 +42,7 @@ pressure:
 	./scripts/04-create-pressure.sh
 
 watch:
-	./scripts/05-watch-demo.sh
+	uv run --script scripts/05-watch-demo.py
 
 remove-pressure:
 	./scripts/06-remove-pressure.sh

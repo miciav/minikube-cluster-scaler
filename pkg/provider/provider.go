@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,13 +25,14 @@ type Config struct {
 
 type Provider struct {
 	protos.UnimplementedCloudProviderServer
-	mu     sync.Mutex
-	gate   chan struct{}
-	cfg    Config
-	client *minikube.Client
-	logger *log.Logger
-	nodes  []corev1.Node
-	target int32
+	mu            sync.Mutex
+	gate          chan struct{}
+	cfg           Config
+	client        *minikube.Client
+	logger        *log.Logger
+	nodes         []corev1.Node
+	target        int32
+	dryRunDeleted map[string]struct{}
 }
 
 func New(cfg Config, client *minikube.Client, logger *log.Logger) (*Provider, error) {
@@ -84,8 +86,17 @@ func (p *Provider) refresh(ctx context.Context) error {
 		return err
 	}
 
-	observed := int32(len(nodes))
 	p.mu.Lock()
+	if p.cfg.DryRun && len(p.dryRunDeleted) != 0 {
+		kept := nodes[:0]
+		for _, node := range nodes {
+			if _, deleted := p.dryRunDeleted[node.Name]; !deleted {
+				kept = append(kept, node)
+			}
+		}
+		nodes = kept
+	}
+	observed := int32(len(nodes))
 	p.nodes = append([]corev1.Node(nil), nodes...)
 	if !p.cfg.DryRun || p.target < observed {
 		p.target = observed
@@ -274,12 +285,113 @@ func (p *Provider) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.Node
 	return &protos.NodeGroupTemplateNodeInfoResponse{NodeBytes: nodeBytes}, nil
 }
 
-func (p *Provider) NodeGroupDeleteNodes(_ context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
+func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
 	var group string
 	if req != nil {
 		group = req.Id
 	}
-	return nil, p.rejectScaleDown(group)
+	fail := func(err error) (*protos.NodeGroupDeleteNodesResponse, error) {
+		p.logger.Printf("scale-down failed group=%s dry-run=%t error=%v", group, p.cfg.DryRun, err)
+		return nil, err
+	}
+	contextStatus := func(err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return status.FromContextError(ctxErr).Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return status.FromContextError(err).Err()
+		}
+		return nil
+	}
+	if group != p.cfg.NodeGroup {
+		err := status.Error(codes.NotFound, "unknown node group")
+		p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
+		return nil, err
+	}
+	if !p.cfg.EnableScaleDown {
+		err := status.Error(codes.FailedPrecondition, "scale-down disabled in this demo")
+		p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
+		return nil, err
+	}
+	if len(req.Nodes) != 1 {
+		return fail(status.Error(codes.InvalidArgument, "exactly one node must be deleted"))
+	}
+	if err := p.acquire(ctx); err != nil {
+		return fail(err)
+	}
+	defer p.release()
+	if err := p.refresh(ctx); err != nil {
+		if contextErr := contextStatus(err); contextErr != nil {
+			return fail(contextErr)
+		}
+		return fail(status.Errorf(codes.Internal, "refresh nodes before scale-down: %v", err))
+	}
+
+	p.mu.Lock()
+	if int32(len(p.nodes)) <= p.cfg.MinNodes {
+		p.mu.Unlock()
+		return fail(status.Error(codes.FailedPrecondition, "deletion would breach minimum node group size"))
+	}
+	requested := req.Nodes[0]
+	index := -1
+	if requested != nil {
+		for i, node := range p.nodes {
+			if requested.Name != "" && requested.Name == node.Name || requested.ProviderID != "" && requested.ProviderID == node.Spec.ProviderID {
+				index = i
+				break
+			}
+		}
+	}
+	if index < 0 {
+		p.mu.Unlock()
+		return fail(status.Error(codes.NotFound, "node is not observed"))
+	}
+	node := p.nodes[index]
+	if node.Name == "" {
+		p.mu.Unlock()
+		return fail(status.Error(codes.FailedPrecondition, "node has no Kubernetes name"))
+	}
+	if _, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; controlPlane {
+		p.mu.Unlock()
+		return fail(status.Error(codes.FailedPrecondition, "control-plane node cannot be deleted"))
+	}
+	if p.cfg.DryRun {
+		if p.dryRunDeleted == nil {
+			p.dryRunDeleted = make(map[string]struct{})
+		}
+		p.dryRunDeleted[node.Name] = struct{}{}
+		p.nodes = append(p.nodes[:index], p.nodes[index+1:]...)
+		p.target--
+		target := p.target
+		p.mu.Unlock()
+		p.logger.Printf("scale-down succeeded group=%s node=%s target=%d dry-run=true", group, node.Name, target)
+		return &protos.NodeGroupDeleteNodesResponse{}, nil
+	}
+	p.mu.Unlock()
+
+	if err := p.client.DeleteNode(ctx, node.Name); err != nil {
+		if contextErr := contextStatus(err); contextErr != nil {
+			return fail(contextErr)
+		}
+		return fail(status.Errorf(codes.Internal, "delete minikube node: %v", err))
+	}
+	if err := p.refresh(ctx); err != nil {
+		if contextErr := contextStatus(err); contextErr != nil {
+			return fail(contextErr)
+		}
+		return fail(status.Errorf(codes.Internal, "refresh nodes after scale-down: %v", err))
+	}
+	p.mu.Lock()
+	for _, observed := range p.nodes {
+		if observed.Name == node.Name {
+			p.mu.Unlock()
+			return fail(status.Errorf(codes.Internal, "deleted node %q is still observed", node.Name))
+		}
+	}
+	target := p.target
+	p.mu.Unlock()
+	p.logger.Printf("scale-down succeeded group=%s node=%s target=%d dry-run=false", group, node.Name, target)
+	return &protos.NodeGroupDeleteNodesResponse{}, nil
 }
 
 func (p *Provider) NodeGroupDecreaseTargetSize(_ context.Context, req *protos.NodeGroupDecreaseTargetSizeRequest) (*protos.NodeGroupDecreaseTargetSizeResponse, error) {

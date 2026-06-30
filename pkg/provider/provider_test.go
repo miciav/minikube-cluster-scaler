@@ -299,7 +299,6 @@ func TestScaleDownBoundary(t *testing.T) {
 		call    func(*Provider, string) error
 	}{
 		{name: "delete disabled", code: codes.FailedPrecondition, phrase: "scale-down disabled in this demo", id: "minikube-workers", call: deleteNodes},
-		{name: "delete enabled", enabled: true, code: codes.Unimplemented, phrase: "scale-down is not implemented in this demo", id: "minikube-workers", call: deleteNodes},
 		{name: "delete unknown group", enabled: true, code: codes.NotFound, phrase: "unknown node group", id: "unknown", call: deleteNodes},
 		{name: "decrease disabled", code: codes.FailedPrecondition, phrase: "scale-down disabled in this demo", id: "minikube-workers", call: decreaseTarget},
 		{name: "decrease enabled", enabled: true, code: codes.Unimplemented, phrase: "scale-down is not implemented in this demo", id: "minikube-workers", call: decreaseTarget},
@@ -330,6 +329,233 @@ func TestScaleDownBoundary(t *testing.T) {
 				t.Fatalf("logs = %q", logs.String())
 			}
 		})
+	}
+}
+
+func TestNodeGroupDeleteNodesDeletesOneObservedWorker(t *testing.T) {
+	tests := []struct {
+		name string
+		node *protos.ExternalGrpcNode
+	}{
+		{name: "by name", node: &protos.ExternalGrpcNode{Name: "worker"}},
+		{name: "by provider ID", node: &protos.ExternalGrpcNode{ProviderID: "minikube://worker"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			call := 0
+			p := testProviderWithLogger(t, false, func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+				call++
+				switch call {
+				case 1:
+					return nodeList(
+						corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo", Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""}}},
+						corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}, Spec: corev1.NodeSpec{ProviderID: "minikube://worker"}},
+					), nil, nil
+				case 2:
+					if name != "minikube" || !reflect.DeepEqual(args, []string{"node", "delete", "worker", "-p", "demo"}) {
+						t.Fatalf("delete command = %s %v", name, args)
+					}
+					return nil, nil, nil
+				case 3:
+					return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo", Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""}}}), nil, nil
+				default:
+					t.Fatalf("unexpected command %d: %s", call, name)
+					return nil, nil, nil
+				}
+			}, log.New(&logs, "", 0))
+			p.cfg.EnableScaleDown = true
+
+			if _, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{tt.node}}); err != nil {
+				t.Fatal(err)
+			}
+			if call != 3 || targetSize(t, p) != 1 {
+				t.Fatalf("commands = %d, target = %d", call, targetSize(t, p))
+			}
+			if got := logs.String(); !strings.Contains(got, "scale-down succeeded") || !strings.Contains(got, "node=worker") {
+				t.Fatalf("logs = %q", got)
+			}
+		})
+	}
+}
+
+func TestNodeGroupDeleteNodesValidatesRequestAndObservedWorker(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     *protos.NodeGroupDeleteNodesRequest
+		nodes   []corev1.Node
+		enabled bool
+		code    codes.Code
+	}{
+		{name: "nil request", code: codes.NotFound},
+		{name: "unknown group", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "unknown", Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}}, code: codes.NotFound},
+		{name: "disabled", req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}}, code: codes.FailedPrecondition},
+		{name: "no nodes", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers"}, code: codes.InvalidArgument},
+		{name: "two nodes", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}, {Name: "worker-2"}}}, code: codes.InvalidArgument},
+		{name: "at minimum", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}}, nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}}, code: codes.FailedPrecondition},
+		{name: "unknown node", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{Name: "missing"}}}, nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker"}}}, code: codes.NotFound},
+		{name: "missing kubernetes name", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{ProviderID: "minikube://worker"}}}, nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, {Spec: corev1.NodeSpec{ProviderID: "minikube://worker"}}}, code: codes.FailedPrecondition},
+		{name: "control plane", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{Name: "demo"}}}, nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "demo", Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""}}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker"}}}, code: codes.FailedPrecondition},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commands := 0
+			p := testProvider(t, false, func(context.Context, string, ...string) ([]byte, []byte, error) {
+				commands++
+				return nodeList(tt.nodes...), nil, nil
+			})
+			p.cfg.EnableScaleDown = tt.enabled
+			_, err := p.NodeGroupDeleteNodes(context.Background(), tt.req)
+			if got := status.Code(err); got != tt.code {
+				t.Fatalf("status = %v, want %v (error %v)", got, tt.code, err)
+			}
+			if tt.enabled && tt.req != nil && tt.req.Id == p.cfg.NodeGroup && len(tt.req.Nodes) == 1 && commands != 1 {
+				t.Fatalf("commands = %d, want one validation refresh", commands)
+			}
+		})
+	}
+}
+
+func TestNodeGroupDeleteNodesValidatesBeforeWaitingForGate(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		req     *protos.NodeGroupDeleteNodesRequest
+		code    codes.Code
+	}{
+		{name: "unknown group", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "unknown", Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}}, code: codes.NotFound},
+		{name: "disabled", req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers", Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}}, code: codes.FailedPrecondition},
+		{name: "invalid cardinality", enabled: true, req: &protos.NodeGroupDeleteNodesRequest{Id: "minikube-workers"}, code: codes.InvalidArgument},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := testProvider(t, false, nodeRunner())
+			p.cfg.EnableScaleDown = tt.enabled
+			<-p.gate
+			defer p.release()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, err := p.NodeGroupDeleteNodes(ctx, tt.req)
+			if got := status.Code(err); got != tt.code {
+				t.Fatalf("status = %v, want %v (error %v)", got, tt.code, err)
+			}
+		})
+	}
+}
+
+func TestNodeGroupDeleteNodesMapsFailuresAndReconciles(t *testing.T) {
+	worker := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}
+	t.Run("refresh failure", func(t *testing.T) {
+		p := testProvider(t, false, func(context.Context, string, ...string) ([]byte, []byte, error) {
+			return nil, []byte("api unavailable"), errors.New("refresh failed")
+		})
+		p.cfg.EnableScaleDown = true
+		_, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: p.cfg.NodeGroup, Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}})
+		if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "refresh failed") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("delete failure", func(t *testing.T) {
+		call := 0
+		p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+			call++
+			if name == "kubectl" {
+				return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, worker), nil, nil
+			}
+			return nil, []byte("delete refused"), errors.New("exit 1")
+		})
+		p.cfg.EnableScaleDown = true
+		_, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: p.cfg.NodeGroup, Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}})
+		if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "delete refused") || call != 2 {
+			t.Fatalf("error = %v, calls = %d", err, call)
+		}
+	})
+	t.Run("command deadline", func(t *testing.T) {
+		p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+			if name == "kubectl" {
+				return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, worker), nil, nil
+			}
+			return nil, nil, context.DeadlineExceeded
+		})
+		p.cfg.EnableScaleDown = true
+		_, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: p.cfg.NodeGroup, Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}})
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.DeadlineExceeded, err)
+		}
+	})
+	t.Run("deleted node still observed", func(t *testing.T) {
+		call := 0
+		p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+			call++
+			if name == "minikube" {
+				return nil, nil, nil
+			}
+			return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, worker), nil, nil
+		})
+		p.cfg.EnableScaleDown = true
+		_, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: p.cfg.NodeGroup, Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}})
+		if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "still observed") || call != 3 || targetSize(t, p) != 2 {
+			t.Fatalf("error = %v, calls = %d, target = %d", err, call, targetSize(t, p))
+		}
+	})
+}
+
+func TestNodeGroupDeleteNodesPreservesContextStatus(t *testing.T) {
+	deleteStarted := make(chan struct{})
+	p := testProvider(t, false, func(ctx context.Context, name string, _ ...string) ([]byte, []byte, error) {
+		if name == "kubectl" {
+			return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}), nil, nil
+		}
+		close(deleteStarted)
+		<-ctx.Done()
+		return nil, nil, ctx.Err()
+	})
+	p.cfg.EnableScaleDown = true
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.NodeGroupDeleteNodes(ctx, &protos.NodeGroupDeleteNodesRequest{Id: p.cfg.NodeGroup, Nodes: []*protos.ExternalGrpcNode{{Name: "worker"}}})
+		done <- err
+	}()
+	select {
+	case <-deleteStarted:
+	case err := <-done:
+		t.Fatalf("delete returned before command started: %v", err)
+	}
+	cancel()
+	if err := <-done; status.Code(err) != codes.Canceled {
+		t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.Canceled, err)
+	}
+}
+
+func TestNodeGroupDeleteNodesDryRunSurvivesRefresh(t *testing.T) {
+	var minikubeCommands int
+	nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker"}, Spec: corev1.NodeSpec{ProviderID: "minikube://worker"}}}
+	p := testProvider(t, true, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+		if name == "minikube" {
+			minikubeCommands++
+		}
+		return nodeList(nodes...), nil, nil
+	})
+	p.cfg.EnableScaleDown = true
+
+	if _, err := p.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{Id: p.cfg.NodeGroup, Nodes: []*protos.ExternalGrpcNode{{ProviderID: "minikube://worker"}}}); err != nil {
+		t.Fatal(err)
+	}
+	assertDeletedWorker := func(stage string) {
+		t.Helper()
+		got, err := p.NodeGroupNodes(context.Background(), &protos.NodeGroupNodesRequest{Id: p.cfg.NodeGroup})
+		if err != nil || len(got.Instances) != 1 || got.Instances[0].Id != "demo" || targetSize(t, p) != 1 {
+			t.Fatalf("%s: nodes = %#v, target = %d, error = %v", stage, got, targetSize(t, p), err)
+		}
+	}
+	assertDeletedWorker("delete")
+	if _, err := p.Refresh(context.Background(), &protos.RefreshRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	assertDeletedWorker("refresh")
+	if minikubeCommands != 0 {
+		t.Fatalf("minikube commands = %d, want 0", minikubeCommands)
 	}
 }
 

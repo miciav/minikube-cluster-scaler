@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"example.com/minikube-externalgrpc-autoscaler-demo/pkg/minikube"
-	providerpkg "example.com/minikube-externalgrpc-autoscaler-demo/pkg/provider"
-	protos "example.com/minikube-externalgrpc-autoscaler-demo/proto"
+	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
+	providerpkg "github.com/miciav/minikube-cluster-scaler/pkg/provider"
+	protos "github.com/miciav/minikube-cluster-scaler/proto"
 	"google.golang.org/grpc"
 )
 

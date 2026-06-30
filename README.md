@@ -1,4 +1,4 @@
-# minikube-externalgrpc-autoscaler-demo
+# minikube-cluster-scaler
 
 > **Teaching demo only — not for production.** The provider is deliberately fake, has no authentication or TLS, and exposes a **plaintext gRPC** endpoint on the host.
 

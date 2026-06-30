@@ -45,7 +45,7 @@
 Run:
 
 ```bash
-go mod init example.com/minikube-externalgrpc-autoscaler-demo
+go mod init github.com/miciav/minikube-cluster-scaler
 curl -fSLo proto/externalgrpc.proto https://raw.githubusercontent.com/kubernetes/autoscaler/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto
 curl -fSLo proto/externalgrpc.pb.go https://raw.githubusercontent.com/kubernetes/autoscaler/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.pb.go
 curl -fSLo proto/externalgrpc_grpc.pb.go https://raw.githubusercontent.com/kubernetes/autoscaler/cluster-autoscaler-1.35.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc_grpc.pb.go
@@ -79,7 +79,7 @@ go mod tidy
 go test ./proto
 ```
 
-Expected: `? example.com/minikube-externalgrpc-autoscaler-demo/proto [no test files]`.
+Expected: `? github.com/miciav/minikube-cluster-scaler/proto [no test files]`.
 
 - [ ] **Step 4: Verify the protocol version marker**
 

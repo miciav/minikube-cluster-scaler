@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	providerpkg "example.com/minikube-externalgrpc-autoscaler-demo/pkg/provider"
+	providerpkg "github.com/miciav/minikube-cluster-scaler/pkg/provider"
 )
 
 func TestParseFlagsDefaults(t *testing.T) {

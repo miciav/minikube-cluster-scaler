@@ -7,8 +7,8 @@ import (
 	"log"
 	"sync"
 
-	"example.com/minikube-externalgrpc-autoscaler-demo/pkg/minikube"
-	protos "example.com/minikube-externalgrpc-autoscaler-demo/proto"
+	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
+	protos "github.com/miciav/minikube-cluster-scaler/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"

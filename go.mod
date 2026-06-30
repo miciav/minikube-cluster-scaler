@@ -1,4 +1,4 @@
-module example.com/minikube-externalgrpc-autoscaler-demo
+module github.com/miciav/minikube-cluster-scaler
 
 go 1.25.0
 

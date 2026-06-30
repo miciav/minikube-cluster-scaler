@@ -157,6 +157,7 @@ make race       # Go race detector
 make vet        # Go static checks
 make build      # provider binary in /tmp
 make shell-test # shell regressions only
+make tui-test   # Rich observer tests only
 ```
 
 Validate shell syntax:
@@ -194,7 +195,7 @@ Always use a dedicated, disposable `PROFILE`. The cleanup script deletes the ent
 
 ### Prerequisites and resources
 
-Install `minikube`, `kubectl`, Go, and Docker for the tested driver path. Then run:
+Install `minikube`, `kubectl`, Go, [`uv`](https://docs.astral.sh/uv/), and Docker for the tested driver path. Then run:
 
 ```sh
 ./scripts/00-check-prereqs.sh
@@ -216,8 +217,18 @@ Terminal 2, after the provider is listening:
 ```sh
 ./scripts/03-deploy-cluster-autoscaler.sh
 ./scripts/04-create-pressure.sh
-./scripts/05-watch-demo.sh
+make watch
 ```
+
+The Rich observer shows nodes, pressure-workload Pods, Cluster Autoscaler decisions, Kubernetes events, provider reachability, and the inferred scaling phase. It is read-only and intentionally excludes provider internal logs; keep Terminal 1 visible when those logs are needed.
+
+Run it directly to select a profile or refresh interval:
+
+```sh
+PROFILE=autoscaling-demo uv run --script scripts/05-watch-demo.py --interval 2
+```
+
+Use `--once` for one non-interactive snapshot. Press `Ctrl-C` to exit continuous mode.
 
 Expected real-mode sequence:
 

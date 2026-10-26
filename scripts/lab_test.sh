@@ -5,6 +5,11 @@ cd "$(dirname "$0")/.."
 # Canonical path: readlink -f resolves macOS /var to /private/var.
 tmp=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$tmp"' EXIT
+# Only the utilities lab needs: CI runners ship kubectl and docker in /usr/bin.
+mkdir "$tmp/sys"
+for tool in awk dirname id ls mkdir od readlink tr; do
+  ln -s "$(command -v "$tool")" "$tmp/sys/$tool"
+done
 unset MINIKUBE_HOME KUBECONFIG LAB_IMAGE LAB_MINIKUBE LAB_KUBECTL PROFILE MIN_NODES DOCKER_HOST 2>/dev/null || true
 
 elf() {
@@ -31,7 +36,7 @@ STUB
 extra_env=
 lab() {
   # shellcheck disable=SC2086 # extra_env is a list of NAME=value words without spaces
-  env HOME="$case_dir/home" PATH="$case_dir/bin:/usr/bin:/bin" DOCKER_LOG="$case_dir/docker.log" \
+  env HOME="$case_dir/home" PATH="$case_dir/bin:$tmp/sys" DOCKER_LOG="$case_dir/docker.log" \
     DOCKER_HOST="unix://$case_dir/docker.sock" $extra_env ./scripts/lab "$@" </dev/null >"$case_dir/out" 2>"$case_dir/err"
 }
 

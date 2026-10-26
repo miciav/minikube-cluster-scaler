@@ -14,8 +14,10 @@ stub() {
 stub docker 'exit 0'
 stub minikube 'printf "%s\n" "${MINIKUBE_STUB_VERSION:-v1.39.0}"'
 stub kubectl 'printf "Client Version: %s\n" "${KUBECTL_STUB_VERSION:-v1.35.6}"'
-# Only the stubs and the base system: no go, uv or protoc.
-path="$tmp:/usr/bin:/bin"
+# Only the stubs and sed: CI runners ship go, kubectl and docker in /usr/bin.
+mkdir "$tmp/sys"
+ln -s "$(command -v sed)" "$tmp/sys/sed"
+path="$tmp:$tmp/sys"
 
 PATH="$path" LAB_CONTAINER=1 ./scripts/00-check-prereqs.sh >"$tmp/out" 2>"$tmp/err"
 if grep -q 'warning:' "$tmp/err"; then exit 1; fi

@@ -5,7 +5,6 @@
 # ///
 
 import importlib.util
-from io import StringIO
 import json
 import os
 import pathlib
@@ -13,14 +12,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from unittest.mock import patch
 
 from rich.console import Console
 
-
 MODULE_PATH = pathlib.Path(__file__).with_name("05-watch-demo.py")
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("watch_demo", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
 watch_demo = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(watch_demo)
 
@@ -106,8 +106,8 @@ class WatchDemoTest(unittest.TestCase):
         self.assertIn('dependencies = ["rich>=14,<15"]', source)
 
     def test_once_runs_through_uv_with_fake_kubectl(self):
-        with tempfile.TemporaryDirectory() as directory:
-            directory = pathlib.Path(directory)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp)
             calls = directory / "calls"
             kubectl = directory / "kubectl"
             kubectl.write_text(
@@ -150,8 +150,9 @@ esac
 
     def test_positive_float_rejects_nonfinite_and_nonpositive_values(self):
         for value in ("nan", "inf", "-inf", "0", "-1"):
-            with self.subTest(value=value), self.assertRaises(
-                watch_demo.argparse.ArgumentTypeError
+            with (
+                self.subTest(value=value),
+                self.assertRaises(watch_demo.argparse.ArgumentTypeError),
             ):
                 watch_demo.positive_float(value)
 
@@ -166,11 +167,7 @@ esac
         output = StringIO()
         console = Console(file=output, width=140, height=24, color_system=None)
 
-        console.print(
-            watch_demo.build_screen(
-                SNAPSHOT_TWO_NODES, SNAPSHOT_ONE_NODE, "demo", 2.0
-            )
-        )
+        console.print(watch_demo.build_screen(SNAPSHOT_TWO_NODES, SNAPSHOT_ONE_NODE, "demo", 2.0))
 
         text = output.getvalue()
         for expected in (
@@ -192,11 +189,7 @@ esac
         output = StringIO()
         console = Console(file=output, width=80, height=24, color_system=None)
 
-        console.print(
-            watch_demo.build_screen(
-                SNAPSHOT_TWO_NODES, SNAPSHOT_ONE_NODE, "demo", 2.0
-            )
-        )
+        console.print(watch_demo.build_screen(SNAPSHOT_TWO_NODES, SNAPSHOT_ONE_NODE, "demo", 2.0))
 
         text = output.getvalue()
         self.assertIn("profile=demo", text)
@@ -234,11 +227,7 @@ esac
         output = StringIO()
         console = Console(file=output, width=140, height=24, color_system=None)
 
-        console.print(
-            watch_demo.build_screen(
-                snapshot, SNAPSHOT_ONE_NODE, "\x1b[2Jdemo\x07", 2.0
-            )
-        )
+        console.print(watch_demo.build_screen(snapshot, SNAPSHOT_ONE_NODE, "\x1b[2Jdemo\x07", 2.0))
 
         text = output.getvalue()
         self.assertIn("profile=demo", text)
@@ -247,8 +236,7 @@ esac
         self.assertNotIn("\x1b", text)
         self.assertFalse(
             any(
-                (ord(character) < 32 and character != "\n")
-                or 127 <= ord(character) <= 159
+                (ord(character) < 32 and character != "\n") or 127 <= ord(character) <= 159
                 for character in text
             )
         )
@@ -281,9 +269,7 @@ esac
             self.assertTrue(watch_demo.provider_reachable())
         connect.assert_called_once_with(("127.0.0.1", 9090), timeout=0.25)
 
-        with patch.object(
-            watch_demo.socket, "create_connection", side_effect=OSError("closed")
-        ):
+        with patch.object(watch_demo.socket, "create_connection", side_effect=OSError("closed")):
             self.assertFalse(watch_demo.provider_reachable())
 
     def test_collect_snapshot_filters_and_orders_state(self):
@@ -303,7 +289,12 @@ esac
             ],
         ]
         events = [
-            {"metadata": {"name": f"event-{i}", "creationTimestamp": f"2026-01-{i + 1:02}T00:00:00Z"}}
+            {
+                "metadata": {
+                    "name": f"event-{i}",
+                    "creationTimestamp": f"2026-01-{i + 1:02}T00:00:00Z",
+                }
+            }
             for i in range(13)
         ]
         events += [
@@ -317,16 +308,39 @@ esac
             tuple(commands[1]): json.dumps(
                 {
                     "items": [
-                        {"metadata": {"name": "pressure", "labels": {"app": "autoscaler-pressure"}}, "status": {"phase": "Pending"}},
-                        {"metadata": {"name": "pressure-2", "labels": {"app": "autoscaler-pressure"}}},
-                        {"metadata": {"name": "pressure-3", "labels": {"app": "autoscaler-pressure"}}},
-                        {"metadata": {"name": "pressure-4", "labels": {"app": "autoscaler-pressure"}}},
+                        {
+                            "metadata": {
+                                "name": "pressure",
+                                "labels": {"app": "autoscaler-pressure"},
+                            },
+                            "status": {"phase": "Pending"},
+                        },
+                        {
+                            "metadata": {
+                                "name": "pressure-2",
+                                "labels": {"app": "autoscaler-pressure"},
+                            }
+                        },
+                        {
+                            "metadata": {
+                                "name": "pressure-3",
+                                "labels": {"app": "autoscaler-pressure"},
+                            }
+                        },
+                        {
+                            "metadata": {
+                                "name": "pressure-4",
+                                "labels": {"app": "autoscaler-pressure"},
+                            }
+                        },
                         {"metadata": {"name": "other", "labels": {"app": "other"}}},
                     ]
                 }
             ),
             tuple(commands[2]): json.dumps({"items": events}),
-            tuple(commands[3]): "ignore\nScale up one\nUNSCHEDULABLE two\nnode three\nquiet\nscale down four\n",
+            tuple(
+                commands[3]
+            ): "ignore\nScale up one\nUNSCHEDULABLE two\nnode three\nquiet\nscale down four\n",
         }
         seen = []
 
@@ -340,7 +354,10 @@ esac
         self.assertEqual(len(snapshot["nodes"]), 2)
         self.assertEqual(len(snapshot["pods"]), 4)
         self.assertTrue(
-            all(pod["metadata"]["labels"]["app"] == "autoscaler-pressure" for pod in snapshot["pods"])
+            all(
+                pod["metadata"]["labels"]["app"] == "autoscaler-pressure"
+                for pod in snapshot["pods"]
+            )
         )
         self.assertEqual(len(snapshot["events"]), 12)
         self.assertEqual(snapshot["events"][0]["metadata"]["name"], "event-time")
@@ -412,7 +429,10 @@ esac
                     {
                         "items": [
                             {"metadata": {"name": "whole"}, "eventTime": "2026-01-01T00:00:00Z"},
-                            {"metadata": {"name": "fractional"}, "eventTime": "2026-01-01T00:00:00.9Z"},
+                            {
+                                "metadata": {"name": "fractional"},
+                                "eventTime": "2026-01-01T00:00:00.9Z",
+                            },
                         ]
                     }
                 )
@@ -433,7 +453,11 @@ esac
             (None, {"nodes": [], "pods": [{"status": {"phase": "Pending"}}]}, "PODS PENDING"),
             ({"nodes": [{}]}, {"nodes": [{}, {}], "pods": []}, "SCALING UP"),
             ({"nodes": [{}, {}]}, {"nodes": [{}], "pods": []}, "SCALING DOWN"),
-            ({"nodes": []}, {"nodes": [], "pods": [{"status": {"phase": "Pending"}}]}, "PODS PENDING"),
+            (
+                {"nodes": []},
+                {"nodes": [], "pods": [{"status": {"phase": "Pending"}}]},
+                "PODS PENDING",
+            ),
             ({"nodes": []}, {"nodes": [], "pods": [{"status": {"phase": "Running"}}]}, "STABLE"),
         ]
         for previous, current, expected in cases:

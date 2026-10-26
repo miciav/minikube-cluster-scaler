@@ -1,0 +1,72 @@
+# Pre-commit hooks: the same checks run locally and in CI.
+#
+#   uvx pre-commit install          # enable on commit
+#   uvx pre-commit run --all-files  # run everything once (make lint)
+#
+# Hooks bring their own tools; only Go (for golangci-lint, actionlint and
+# kubeconform) and uv (for basedpyright) must be on PATH.
+
+exclude: ^proto/.*\.pb\.go$
+fail_fast: false
+
+repos:
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.15.0
+    hooks:
+      - id: golangci-lint-full
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        files: (\.sh$|^scripts/lab$)
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.2
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # The observer drives kubectl through subprocess on purpose: that is its job.
+  - repo: https://github.com/PyCQA/bandit
+    rev: "1.9.4"
+    hooks:
+      - id: bandit
+        args: [-s, "B404,B603,B607"]
+        files: ^scripts/.*\.py$
+        exclude: _test\.py$
+
+  - repo: local
+    hooks:
+      - id: basedpyright
+        name: basedpyright
+        entry: uv run --no-project --with 'rich>=14,<15' --with basedpyright==1.40.2 basedpyright
+        language: system
+        pass_filenames: false
+        files: ^scripts/.*\.py$
+
+      - id: kubeconform
+        name: kubeconform
+        entry: go run github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0 -strict -summary -kubernetes-version 1.35.0
+        language: system
+        files: ^deploy/.*\.yaml$
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: mixed-line-ending
+        args: [--fix=lf]

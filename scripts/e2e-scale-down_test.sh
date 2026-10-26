@@ -1,4 +1,6 @@
 #!/bin/sh
+# These tests grep for literal shell text, so single quotes are intended.
+# shellcheck disable=SC2016
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -9,7 +11,7 @@ grep -Fq 'minikube ssh -p "$PROFILE" -- "nc -z -w 2 host.minikube.internal 9090"
 grep -Fq 'kill -0 "$provider_pid"' scripts/e2e-scale-down.sh
 grep -Fq 'wait "$provider_pid"' scripts/e2e-scale-down.sh
 grep -Fq 'rm -f "$provider_log" "$provider_bin"' scripts/e2e-scale-down.sh
-! grep -Fq './scripts/02-run-provider.sh' scripts/e2e-scale-down.sh
+if grep -Fq './scripts/02-run-provider.sh' scripts/e2e-scale-down.sh; then exit 1; fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' 0

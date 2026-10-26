@@ -1,3 +1,4 @@
+// Command provider serves the Cluster Autoscaler externalgrpc API for one minikube node group.
 package main
 
 import (
@@ -13,10 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
 	providerpkg "github.com/miciav/minikube-cluster-scaler/pkg/provider"
 	protos "github.com/miciav/minikube-cluster-scaler/proto"
-	"google.golang.org/grpc"
 )
 
 const shutdownGracePeriod = 5 * time.Second
@@ -71,9 +73,10 @@ func parseFlags(args []string) (options, error) {
 
 func (opts options) providerConfig() providerpkg.Config {
 	return providerpkg.Config{
-		NodeGroup:       opts.nodeGroup,
-		MinNodes:        int32(opts.minNodes),
-		MaxNodes:        int32(opts.maxNodes),
+		NodeGroup: opts.nodeGroup,
+		// parseFlags bounds both values to [0, math.MaxInt32].
+		MinNodes:        int32(opts.minNodes), //nolint:gosec // bounded by parseFlags
+		MaxNodes:        int32(opts.maxNodes), //nolint:gosec // bounded by parseFlags
 		DryRun:          opts.dryRun,
 		EnableScaleDown: opts.enableScaleDown,
 	}
@@ -107,11 +110,11 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return fmt.Errorf("initial refresh: %w", err)
 	}
 
-	listener, err := net.Listen("tcp", opts.listen)
+	listener, err := new(net.ListenConfig).Listen(ctx, "tcp", opts.listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", opts.listen, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }() // already closed by Serve on the normal path
 	server := grpc.NewServer()
 	protos.RegisterCloudProviderServer(server, p)
 	logger.Printf("starting provider listen=%s profile=%s node-group=%s min-nodes=%d max-nodes=%d dry-run=%t enable-scale-down=%t",
@@ -127,16 +130,22 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return fmt.Errorf("gRPC server stopped unexpectedly")
 	case <-ctx.Done():
 		stopWithTimeout(server.GracefulStop, server.Stop, shutdownGracePeriod)
-		<-serveErr
+		if err := <-serveErr; err != nil {
+			return fmt.Errorf("serve gRPC: %w", err)
+		}
 		return nil
 	}
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "provider: %v\n", err)
+	if err := runWithSignals(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "provider: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runWithSignals() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return run(ctx, os.Args[1:], os.Stderr)
 }

@@ -15,14 +15,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
-	protos "github.com/miciav/minikube-cluster-scaler/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
+	protos "github.com/miciav/minikube-cluster-scaler/proto"
 )
 
 func TestNewValidatesConfig(t *testing.T) {
@@ -194,7 +195,7 @@ func TestNodeGroupTemplateNodeInfoReturnsSanitizedObservedNode(t *testing.T) {
 				OSImage:                 "os-image",
 				ContainerRuntimeVersion: "container-runtime",
 				KubeletVersion:          "kubelet",
-				KubeProxyVersion:        "kube-proxy",
+				KubeProxyVersion:        "kube-proxy", //nolint:staticcheck // set to prove the template drops it
 				OperatingSystem:         "linux",
 				Architecture:            "amd64",
 			},

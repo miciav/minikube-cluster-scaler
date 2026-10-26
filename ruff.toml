@@ -1,0 +1,10 @@
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PL", "S", "N"]
+
+[lint.per-file-ignores]
+# Tests assert literal values and run fakes; the demo script drives kubectl on purpose.
+# Fixtures embed whole kubectl JSON documents on one line.
+"*_test.py" = ["S", "PLR2004", "E501"]

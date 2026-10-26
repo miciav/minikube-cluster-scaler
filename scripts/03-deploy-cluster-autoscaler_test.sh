@@ -1,4 +1,6 @@
 #!/bin/sh
+# These tests grep for literal shell text, so single quotes are intended.
+# shellcheck disable=SC2016
 set -eu
 
 cd "$(dirname "$0")/.."

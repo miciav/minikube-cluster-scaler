@@ -1,0 +1,49 @@
+version: "2"
+
+linters:
+  enable:
+    - contextcheck
+    - copyloopvar
+    - cyclop
+    - dupl
+    - errorlint
+    - gocognit
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - thelper
+    - unconvert
+    - unparam
+    - usestdlibvars
+  settings:
+    cyclop:
+      max-complexity: 20
+    gocognit:
+      min-complexity: 30
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: strict
+    paths:
+      - proto/
+    rules:
+      # Table-driven tests and fake runners are long and repetitive by design.
+      - path: _test\.go
+        linters: [cyclop, dupl, gocognit]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/miciav/minikube-cluster-scaler
+  exclusions:
+    generated: strict
+    paths:
+      - proto/

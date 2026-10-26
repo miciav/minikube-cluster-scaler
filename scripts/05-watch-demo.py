@@ -23,12 +23,17 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-
 ANSI_ESCAPE = re.compile(
     r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|[PX^_].*?\x1b\\|\[[0-?]*[ -/]*[@-~]|[@-_])"
     r"|\x9b[0-?]*[ -/]*[@-~]",
     re.DOTALL,
 )
+
+FIRST_PRINTABLE = 32
+C1_CONTROLS = range(127, 160)
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
 
 
 def sanitize(value):
@@ -37,14 +42,14 @@ def sanitize(value):
         " " if character in "\t\r\n" else character
         for character in text
         if character in "\t\r\n"
-        or (ord(character) >= 32 and not 127 <= ord(character) <= 159)
+        or (ord(character) >= FIRST_PRINTABLE and ord(character) not in C1_CONTROLS)
     )
 
 
 def run_command(args):
-    return subprocess.run(
-        args, check=True, capture_output=True, text=True, timeout=5
-    ).stdout
+    # Fixed kubectl argv built by collect_snapshot, never a shell.
+    result = subprocess.run(args, check=True, capture_output=True, text=True, timeout=5)  # noqa: S603
+    return result.stdout
 
 
 def provider_reachable():
@@ -163,12 +168,12 @@ def object_age(metadata, now=None):
         seconds = max(0, int(((now or datetime.datetime.now(datetime.UTC)) - then).total_seconds()))
     except (TypeError, ValueError):
         return "?"
-    if seconds >= 86400:
-        return f"{seconds // 86400}d"
-    if seconds >= 3600:
-        return f"{seconds // 3600}h"
-    if seconds >= 60:
-        return f"{seconds // 60}m"
+    if seconds >= SECONDS_PER_DAY:
+        return f"{seconds // SECONDS_PER_DAY}d"
+    if seconds >= SECONDS_PER_HOUR:
+        return f"{seconds // SECONDS_PER_HOUR}h"
+    if seconds >= SECONDS_PER_MINUTE:
+        return f"{seconds // SECONDS_PER_MINUTE}m"
     return f"{seconds}s"
 
 
@@ -186,7 +191,11 @@ def nodes_table(snapshot):
         labels = metadata.get("labels", {})
         role = "control-plane" if "node-role.kubernetes.io/control-plane" in labels else "worker"
         ready = next(
-            (condition.get("status") for condition in node.get("status", {}).get("conditions", []) if condition.get("type") == "Ready"),
+            (
+                condition.get("status")
+                for condition in node.get("status", {}).get("conditions", [])
+                if condition.get("type") == "Ready"
+            ),
             "Unknown",
         )
         table.add_row(
@@ -213,7 +222,10 @@ def pods_table(snapshot):
         phase = sanitize(pod.get("status", {}).get("phase", "Unknown"))
         table.add_row(
             Text(sanitize(metadata.get("name", "-"))),
-            Text(phase, style="green" if phase == "Running" else "yellow" if phase == "Pending" else "red"),
+            Text(
+                phase,
+                style="green" if phase == "Running" else "yellow" if phase == "Pending" else "red",
+            ),
             Text(sanitize(pod.get("spec", {}).get("nodeName", "-"))),
         )
     return Panel(table, title="WORKLOAD PODS", border_style="cyan")
@@ -230,8 +242,13 @@ def summary_panel(snapshot, phase):
         Group(
             Text(f"Nodes: {len(snapshot['nodes'])}"),
             Text(f"Pressure Pods: {len(snapshot['pods'])} ({pod_counts})"),
-            Text(f"Provider: {provider}", style="green" if snapshot.get("provider_reachable") else "red"),
-            Text(f"Autoscaler: {autoscaler}", style="green" if autoscaler == "available" else "red"),
+            Text(
+                f"Provider: {provider}",
+                style="green" if snapshot.get("provider_reachable") else "red",
+            ),
+            Text(
+                f"Autoscaler: {autoscaler}", style="green" if autoscaler == "available" else "red"
+            ),
             Text(f"Direction: {phase}", style="yellow" if phase != "STABLE" else "green"),
         ),
         title="SUMMARY",
@@ -260,9 +277,7 @@ def events_panel(snapshot):
             timestamp = raw_timestamp(event) or "-"
             reason = event.get("reason", "-")
             message = event.get("message", "-")
-            lines.append(
-                Text(f"{sanitize(timestamp)}  {sanitize(reason)}  {sanitize(message)}")
-            )
+            lines.append(Text(f"{sanitize(timestamp)}  {sanitize(reason)}  {sanitize(message)}"))
         content = Group(*lines)
     else:
         content = Text("No recent Kubernetes events", style="dim")

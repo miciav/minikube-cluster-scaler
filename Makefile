@@ -1,4 +1,4 @@
-.PHONY: test shell-test tui-test race vet build generate check start provider deploy pressure watch remove-pressure cleanup
+.PHONY: test shell-test tui-test race vet lint tidy-check vuln proto-check build generate check start provider deploy pressure watch remove-pressure cleanup
 
 test: shell-test tui-test
 	go test ./...
@@ -19,6 +19,19 @@ race:
 
 vet:
 	go vet ./...
+
+lint:
+	uvx pre-commit run --all-files
+
+tidy-check:
+	go mod tidy -diff
+	go mod verify
+
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+proto-check: generate
+	git diff --exit-code proto/
 
 build:
 	go build -o /tmp/minikube-externalgrpc-provider ./cmd/provider

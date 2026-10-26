@@ -1,27 +1,62 @@
-.PHONY: test shell-test tui-test race vet build generate check start provider deploy pressure watch remove-pressure cleanup
+.PHONY: verify test shell-test tui-test race cover vet lint tidy-check vuln proto-check build image sonar generate check start provider deploy pressure watch remove-pressure cleanup
 
 test: shell-test tui-test
 	go test ./...
 
+verify: lint tidy-check vuln cover race shell-test tui-test
+
 shell-test:
+	./scripts/00-check-prereqs_test.sh
 	./scripts/01-start-minikube_test.sh
+	./scripts/02-run-provider_test.sh
 	./scripts/03-deploy-cluster-autoscaler_test.sh
 	./scripts/04-create-pressure_test.sh
 	./scripts/06-remove-pressure_test.sh
+	./scripts/99-cleanup_test.sh
+	./scripts/lab-entrypoint_test.sh
+	./scripts/lab_test.sh
+	./scripts/sonar_test.sh
 	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 
+PY_COVERAGE = uv run --no-project --with 'rich>=14,<15' --with 'coverage>=7,<8' python -m coverage
+
 tui-test:
-	uv run --script scripts/05-watch-demo_test.py
+	$(PY_COVERAGE) run --include=scripts/05-watch-demo.py scripts/05-watch-demo_test.py
+	$(PY_COVERAGE) report --show-missing --fail-under=90
+	$(PY_COVERAGE) xml -q
 
 race:
 	go test -race ./...
 
+cover:
+	go test -coverprofile=coverage.out ./cmd/... ./pkg/...
+	go tool cover -func=coverage.out | awk '/^total:/ { sub(/%/, "", $$3); print "Go coverage " $$3 "% (minimum 90%)"; exit ($$3 + 0 < 90) }'
+
 vet:
 	go vet ./...
 
+lint:
+	uvx pre-commit run --all-files
+
+tidy-check:
+	go mod tidy -diff
+	go mod verify
+
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+proto-check: generate
+	git diff --exit-code proto/
+
 build:
 	go build -o /tmp/minikube-externalgrpc-provider ./cmd/provider
+
+image:
+	docker build -t minikube-cluster-scaler:dev .
+
+sonar:
+	./scripts/sonar.sh --rm
 
 generate:
 	./proto/generate.sh

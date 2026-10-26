@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # GitHub's default is `bash -e` without pipefail: a failure inside a pipe would pass.
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.x"
+  KUBECTL_VERSION: v1.35.6
+  MINIKUBE_VERSION: v1.39.0
+
+jobs:
+  # The same hooks developers run locally: golangci-lint, shellcheck, ruff,
+  # bandit, basedpyright, hadolint, kubeconform, actionlint and file hygiene.
+  pre-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: uvx pre-commit run --all-files --show-diff-on-failure --color=always
+
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go.mod and go.sum are tidy and verified
+        run: make tidy-check
+      - name: No reachable vulnerabilities
+        run: make vuln
+      - name: Race detector
+        run: make race
+      - name: Coverage gate (90%)
+        run: make cover
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  # The committed bindings must match what the pinned generators produce.
+  proto:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install the pinned protobuf toolchain
+        run: |
+          curl -fsSLo /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v33.0/protoc-33.0-linux-x86_64.zip
+          sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make proto-check
+
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Shell script tests
+        run: make shell-test
+      - name: Observer tests and coverage gate (90%)
+        run: make tui-test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: observer-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  # Builds the image students use, scans it, and runs the real 1 -> 2 -> 1
+  # autoscaling cycle through the `lab` wrapper on both architectures.
+  image-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      LAB_IMAGE: lab:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the lab image
+        run: docker build --build-arg LAB_IMAGE_TAG=ci -t lab:ci .
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: lab:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Extract the wrapper from the image
+        run: |
+          docker run --rm lab:ci wrapper > lab
+          chmod +x lab
+          ./lab help
+      - name: Install minikube and kubectl (official binaries)
+        run: |
+          curl -fsSLo minikube "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${{ matrix.arch }}"
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${{ matrix.arch }}/kubectl"
+          sudo install minikube kubectl /usr/local/bin/
+          rm minikube kubectl
+      - run: ./lab check
+      - name: Scale 1 -> 2 -> 1 through lab
+        run: ./lab e2e
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          minikube logs -p autoscaling-scale-down --file=minikube.log || true
+          kubectl --context autoscaling-scale-down get events -A --sort-by=.lastTimestamp > events.txt || true
+          kubectl --context autoscaling-scale-down -n kube-system logs deployment/cluster-autoscaler > cluster-autoscaler.log || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: e2e-diagnostics-${{ matrix.arch }}
+          path: |
+            minikube.log
+            events.txt
+            cluster-autoscaler.log
+          if-no-files-found: ignore

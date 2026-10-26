@@ -1,3 +1,4 @@
+// Command provider serves the Cluster Autoscaler externalgrpc API for one minikube node group.
 package main
 
 import (
@@ -13,10 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
 	providerpkg "github.com/miciav/minikube-cluster-scaler/pkg/provider"
 	protos "github.com/miciav/minikube-cluster-scaler/proto"
-	"google.golang.org/grpc"
 )
 
 const shutdownGracePeriod = 5 * time.Second
@@ -29,7 +31,6 @@ type options struct {
 	maxNodes        int64
 	dryRun          bool
 	enableScaleDown bool
-	verbosity       int
 }
 
 func parseFlags(args []string) (options, error) {
@@ -43,7 +44,6 @@ func parseFlags(args []string) (options, error) {
 	flags.Int64Var(&opts.maxNodes, "max-nodes", 3, "maximum node count")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "simulate scaling without changing minikube")
 	flags.BoolVar(&opts.enableScaleDown, "enable-scale-down", false, "enable the scale-down boundary")
-	flags.IntVar(&opts.verbosity, "v", 1, "log verbosity")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -68,17 +68,15 @@ func parseFlags(args []string) (options, error) {
 	if opts.minNodes > math.MaxInt32 || opts.maxNodes > math.MaxInt32 {
 		return options{}, fmt.Errorf("node bounds must fit int32")
 	}
-	if opts.verbosity < 0 {
-		return options{}, fmt.Errorf("verbosity must not be negative")
-	}
 	return opts, nil
 }
 
 func (opts options) providerConfig() providerpkg.Config {
 	return providerpkg.Config{
-		NodeGroup:       opts.nodeGroup,
-		MinNodes:        int32(opts.minNodes),
-		MaxNodes:        int32(opts.maxNodes),
+		NodeGroup: opts.nodeGroup,
+		// parseFlags bounds both values to [0, math.MaxInt32].
+		MinNodes:        int32(opts.minNodes), //nolint:gosec // bounded by parseFlags
+		MaxNodes:        int32(opts.maxNodes), //nolint:gosec // bounded by parseFlags
 		DryRun:          opts.dryRun,
 		EnableScaleDown: opts.enableScaleDown,
 	}
@@ -112,15 +110,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return fmt.Errorf("initial refresh: %w", err)
 	}
 
-	listener, err := net.Listen("tcp", opts.listen)
+	listener, err := new(net.ListenConfig).Listen(ctx, "tcp", opts.listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", opts.listen, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }() // already closed by Serve on the normal path
 	server := grpc.NewServer()
 	protos.RegisterCloudProviderServer(server, p)
-	logger.Printf("starting provider listen=%s profile=%s node-group=%s min-nodes=%d max-nodes=%d dry-run=%t enable-scale-down=%t v=%d",
-		opts.listen, opts.profile, opts.nodeGroup, opts.minNodes, opts.maxNodes, opts.dryRun, opts.enableScaleDown, opts.verbosity)
+	logger.Printf("starting provider listen=%s profile=%s node-group=%s min-nodes=%d max-nodes=%d dry-run=%t enable-scale-down=%t",
+		opts.listen, opts.profile, opts.nodeGroup, opts.minNodes, opts.maxNodes, opts.dryRun, opts.enableScaleDown)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
@@ -132,16 +130,22 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return fmt.Errorf("gRPC server stopped unexpectedly")
 	case <-ctx.Done():
 		stopWithTimeout(server.GracefulStop, server.Stop, shutdownGracePeriod)
-		<-serveErr
+		if err := <-serveErr; err != nil {
+			return fmt.Errorf("serve gRPC: %w", err)
+		}
 		return nil
 	}
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "provider: %v\n", err)
+	if err := runWithSignals(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "provider: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runWithSignals() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return run(ctx, os.Args[1:], os.Stderr)
 }

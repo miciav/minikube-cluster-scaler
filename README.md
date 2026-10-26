@@ -11,6 +11,75 @@ minikube node delete <node-name> -p <profile>
 
 > **Demonstration only — not for production.** The provider has no authentication or TLS, exposes a plaintext gRPC endpoint, models only one node group, and can delete minikube workers from the selected profile.
 
+## Lab (students)
+
+The whole demo runs from one container image driven by a small `lab` command. Nothing but Docker, minikube and kubectl has to be installed.
+
+### Prerequisites
+
+- A Linux VM (amd64 or arm64) with Docker, and your user in the `docker` group (`sudo usermod -aG docker "$USER"`, then log in again).
+- The **official** Linux binaries of [minikube](https://minikube.sigs.k8s.io/docs/start/) v1.38.0 or newer and [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) 1.34–1.36. Snap packages do not work: `lab` mounts the real binaries into the container, and a snap command is a launcher that only works on the host.
+- 2 CPUs and 4 GiB of memory per minikube node, for up to three nodes.
+
+### Install `lab`
+
+The image prints a wrapper bound to its own version:
+
+```sh
+docker run --rm ghcr.io/miciav/minikube-cluster-scaler:latest wrapper > /tmp/lab \
+  && install -D -m 755 /tmp/lab ~/bin/lab
+export PATH="$HOME/bin:$PATH"   # new shells pick up ~/bin from ~/.profile
+lab check
+```
+
+Writing to `/tmp/lab` first means a failed pull never leaves an empty `lab` behind.
+
+`lab check` shows which minikube, kubectl, Docker socket, minikube home and kubeconfig it found, and warns about incompatible versions.
+
+### Run the demo
+
+Terminal 1:
+
+```sh
+lab start       # minikube with the right Kubernetes version, CNI and resources
+lab provider    # the externalgrpc provider; keep it running (Ctrl-C stops it)
+```
+
+Terminal 2:
+
+```sh
+lab deploy           # Cluster Autoscaler
+lab watch            # live nodes, Pods, decisions and events (Ctrl-C to exit)
+```
+
+Terminal 3:
+
+```sh
+lab pressure         # Pods that do not fit: watch the cluster grow 1 -> 2
+lab remove-pressure  # watch it shrink back 2 -> 1
+lab cleanup          # delete the whole minikube profile
+```
+
+`lab help` lists every subcommand. The demo variables (`PROFILE`, `MIN_NODES`, `MAX_NODES`, `MINIKUBE_CPUS`, …, see [Demo configuration](#demo-configuration)) are passed through when set.
+
+### How `lab` works
+
+`lab` finds `minikube` and `kubectl` on your `PATH`, follows symlinks to the real files and mounts them read-only into the container. It also mounts the Docker socket, `~/.minikube` (or `MINIKUBE_HOME`) and the directory of `~/.kube/config` (or `KUBECONFIG`) at the same paths. The container runs with your user ID and the host network, so the provider listens on port 9090 of the VM exactly as in the manual setup.
+
+| Variable | Purpose |
+| --- | --- |
+| `LAB_IMAGE` | Image to run instead of the one the wrapper was printed by. |
+| `LAB_MINIKUBE`, `LAB_KUBECTL` | Explicit paths when the tools are not on `PATH`. |
+| `MINIKUBE_HOME`, `KUBECONFIG` | Honored as by minikube and kubectl; `KUBECONFIG` must name a single file. |
+| `DOCKER_HOST` | A `unix://` socket path; other transports are not supported. |
+
+### Lab troubleshooting
+
+- **"… is a script or snap wrapper"** or **"… snap …"**: install the official binary from the links above (`snap remove kubectl minikube` first).
+- **"cannot use Docker socket"**: add your user to the `docker` group and log in again.
+- **"… not found on PATH"**: install the tool, or set `LAB_MINIKUBE` / `LAB_KUBECTL`.
+- **"KUBECONFIG … lists several files"**: point `KUBECONFIG` at one file while using `lab`.
+
 ## Provider architecture
 
 ```text
@@ -56,7 +125,7 @@ The initial minikube node can act as both control plane and worker. It is counte
 
 Requirements:
 
-- Go 1.25+ or compatible automatic toolchain selection
+- Go 1.26+ or compatible automatic toolchain selection
 - `minikube`
 - `kubectl`
 - an existing minikube profile
@@ -90,7 +159,6 @@ make build
 | `--max-nodes` | `3` | Maximum accepted group size. |
 | `--dry-run` | `false` | Simulates target changes without invoking minikube add or delete commands. |
 | `--enable-scale-down` | `false` | Enables validated worker deletion through `NodeGroupDeleteNodes`. |
-| `--v` | `1` | Accepted and reported; operation logs are currently unconditional. |
 
 Typical scale-up logs are intentionally explicit:
 
@@ -151,22 +219,30 @@ Generated Go files are committed, so protobuf tooling is not required to build o
 
 ## Development
 
-```sh
-make test       # Go tests and shell regression checks
-make race       # Go race detector
-make vet        # Go static checks
-make build      # provider binary in /tmp
-make shell-test # shell regressions only
-make tui-test   # Rich observer tests only
-```
-
-Validate shell syntax:
+Requirements: Go 1.26+, [`uv`](https://docs.astral.sh/uv/) and Docker. Install the hooks once:
 
 ```sh
-for script in scripts/*.sh deploy/*_test.sh proto/generate.sh; do
-  sh -n "$script"
-done
+uvx pre-commit install
 ```
+
+```sh
+make verify      # everything CI runs that works locally (below)
+make lint        # pre-commit hooks: golangci-lint, shellcheck, ruff, bandit,
+                 # basedpyright, hadolint, kubeconform, actionlint, file hygiene
+make tidy-check  # go.mod/go.sum tidy and verified
+make vuln        # govulncheck: reachable vulnerabilities in dependencies
+make cover       # Go tests with the 90% coverage gate (coverage.out)
+make race        # Go race detector
+make shell-test  # shell script tests with stub commands
+make tui-test    # observer tests with the 90% coverage gate (coverage.xml)
+make proto-check # regenerate bindings (pinned protoc) and fail on drift
+make image       # build the lab image as minikube-cluster-scaler:dev
+make sonar       # local SonarQube analysis in Docker (needs sonar-scanner)
+```
+
+To try a local image with the wrapper: `LAB_IMAGE=minikube-cluster-scaler:dev ./scripts/lab help`.
+
+CI (`.github/workflows/ci.yml`) runs the same checks plus a Trivy scan of the image and the real `1 -> 2 -> 1` cycle through `lab` on amd64 and arm64. `release.yml` publishes `ghcr.io/miciav/minikube-cluster-scaler` (`edge` from `master`, `X.Y.Z` and `latest` from `vX.Y.Z` tags).
 
 ## Minikube scale-up and scale-down demo
 

@@ -1,1 +1,6 @@
 .worktrees/
+docs/superpowers/
+coverage.out
+.coverage
+coverage.xml
+.scannerwork/

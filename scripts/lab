@@ -1,0 +1,88 @@
+#!/bin/sh
+# Runs the minikube autoscaling lab in a container; see README "Lab".
+#
+# minikube and kubectl come from this VM and are mounted into the container,
+# so both sides always use the same versions on the same minikube state.
+set -eu
+
+LAB_IMAGE=${LAB_IMAGE:-__LAB_IMAGE__}
+
+die() {
+  printf 'lab: %s\n' "$*" >&2
+  exit 1
+}
+
+# require_elf PATH NAME fails unless PATH is a Linux executable that can be mounted.
+require_elf() {
+  { [ -f "$1" ] && [ -x "$1" ]; } || die "$2 at $1 is not an executable file"
+  [ "$(od -An -tx1 -N4 "$1" | tr -d ' \n')" = 7f454c46 ] ||
+    die "$2 at $1 is a script or snap wrapper, not a Linux executable: install the official binary (see README \"Lab\")"
+}
+
+# find_binary NAME [OVERRIDE] prints the real file behind NAME on PATH, or behind OVERRIDE.
+find_binary() {
+  path=${2:-$(command -v "$1" 2>/dev/null || true)}
+  [ -n "$path" ] || die "$1 not found on PATH: install the official binary (see README \"Lab\")"
+  case "$path" in
+    /snap/*) die "$1 at $path is a snap package, which cannot run in the container: install the official binary (see README \"Lab\")" ;;
+  esac
+  path=$(readlink -f "$path") || die "cannot resolve $1 at $path"
+  # /snap/bin/<tool> resolves to the snap launcher, a real ELF that is not the tool.
+  case "$path" in
+    */snap) die "$1 resolves to the snap launcher $path: install the official binary (see README \"Lab\")" ;;
+  esac
+  require_elf "$path" "$1"
+  printf '%s\n' "$path"
+}
+
+minikube_bin=$(find_binary minikube "${LAB_MINIKUBE:-}")
+kubectl_bin=$(find_binary kubectl "${LAB_KUBECTL:-}")
+
+case "${DOCKER_HOST:-}" in
+  '') socket=/var/run/docker.sock ;;
+  unix://*) socket=${DOCKER_HOST#unix://} ;;
+  *) die "DOCKER_HOST=$DOCKER_HOST is not a unix socket; lab needs the local Docker socket" ;;
+esac
+[ -e "$socket" ] || die "Docker socket $socket not found: is Docker running?"
+{ [ -r "$socket" ] && [ -w "$socket" ]; } ||
+  die "cannot use Docker socket $socket: add your user to the docker group (sudo usermod -aG docker \"\$USER\") and log in again"
+# shellcheck disable=SC2012 # one known path; stat and find -printf differ between GNU and BSD
+socket_gid=$(ls -ln "$socket" | awk '{ print $4 }')
+
+MINIKUBE_HOME=${MINIKUBE_HOME:-$HOME/.minikube}
+KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config}
+case "$KUBECONFIG" in
+  *:*) die "KUBECONFIG=$KUBECONFIG lists several files; lab supports a single kubeconfig" ;;
+esac
+kube_dir=$(dirname "$KUBECONFIG")
+# Create them as the user: Docker would create missing mount sources owned by root.
+mkdir -p "$MINIKUBE_HOME" "$kube_dir"
+export MINIKUBE_HOME KUBECONFIG
+
+if [ "${1:-}" = check ]; then
+  printf 'minikube: %s\nkubectl: %s\ndocker socket: %s\nminikube home: %s\nkubeconfig: %s\n' \
+    "$minikube_bin" "$kubectl_bin" "$socket" "$MINIKUBE_HOME" "$KUBECONFIG"
+fi
+
+tty_flags=
+if [ -t 0 ]; then
+  tty_flags=-i
+  [ ! -t 1 ] || tty_flags=-it
+fi
+
+set -- "$LAB_IMAGE" "$@"
+for name in PROFILE MINIKUBE_DRIVER MINIKUBE_CNI KUBERNETES_VERSION CA_VERSION MIN_NODES MAX_NODES \
+  ENABLE_SCALE_DOWN SCALE_DOWN_DELAY_AFTER_ADD SCALE_DOWN_UNNEEDED_TIME MINIKUBE_CPUS MINIKUBE_MEMORY \
+  E2E_TIMEOUT_SECONDS; do
+  eval "is_set=\${$name+x}"
+  [ -z "$is_set" ] || set -- -e "$name" "$@"
+done
+
+exec docker run --rm --init ${tty_flags:+"$tty_flags"} --network host \
+  --user "$(id -u):$(id -g)" --group-add "$socket_gid" -e HOME \
+  -v "$socket:/var/run/docker.sock" -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -v "$MINIKUBE_HOME:$MINIKUBE_HOME" -e MINIKUBE_HOME \
+  -v "$kube_dir:$kube_dir" -e KUBECONFIG \
+  -v "$minikube_bin:/usr/local/bin/minikube:ro" \
+  -v "$kubectl_bin:/usr/local/bin/kubectl:ro" \
+  "$@"

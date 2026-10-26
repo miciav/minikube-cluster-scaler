@@ -1,3 +1,4 @@
+// Package provider implements the externalgrpc CloudProvider service for one minikube node group.
 package provider
 
 import (
@@ -8,13 +9,17 @@ import (
 	"log"
 	"sync"
 
-	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
-	protos "github.com/miciav/minikube-cluster-scaler/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/miciav/minikube-cluster-scaler/pkg/minikube"
+	protos "github.com/miciav/minikube-cluster-scaler/proto"
 )
 
+const errUnknownGroup = "unknown node group"
+
+// Config describes the single node group and the demo switches.
 type Config struct {
 	NodeGroup       string
 	MinNodes        int32
@@ -23,6 +28,7 @@ type Config struct {
 	EnableScaleDown bool
 }
 
+// Provider serves the externalgrpc CloudProvider API backed by minikube.
 type Provider struct {
 	protos.UnimplementedCloudProviderServer
 	mu            sync.Mutex
@@ -35,6 +41,7 @@ type Provider struct {
 	dryRunDeleted map[string]struct{}
 }
 
+// New validates cfg and returns a Provider; a nil logger discards output.
 func New(cfg Config, client *minikube.Client, logger *log.Logger) (*Provider, error) {
 	if cfg.NodeGroup == "" {
 		return nil, fmt.Errorf("node group is required")
@@ -51,7 +58,7 @@ func New(cfg Config, client *minikube.Client, logger *log.Logger) (*Provider, er
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	p := &Provider{cfg: cfg, client: client, logger: logger, gate: make(chan struct{}, 1)}
+	p := &Provider{cfg: cfg, client: client, logger: logger, gate: make(chan struct{}, 1), dryRunDeleted: make(map[string]struct{})}
 	p.gate <- struct{}{}
 	return p, nil
 }
@@ -65,6 +72,7 @@ func (p *Provider) group() *protos.NodeGroup {
 	}
 }
 
+// Refresh re-reads the observed nodes.
 func (p *Provider) Refresh(ctx context.Context, _ *protos.RefreshRequest) (*protos.RefreshResponse, error) {
 	if err := p.acquire(ctx); err != nil {
 		return nil, err
@@ -96,7 +104,7 @@ func (p *Provider) refresh(ctx context.Context) error {
 		}
 		nodes = kept
 	}
-	observed := int32(len(nodes))
+	observed := int32(len(nodes)) //nolint:gosec // a minikube cluster has a handful of nodes
 	p.nodes = append([]corev1.Node(nil), nodes...)
 	if !p.cfg.DryRun || p.target < observed {
 		p.target = observed
@@ -122,10 +130,44 @@ func (p *Provider) release() {
 	p.gate <- struct{}{}
 }
 
+func (p *Provider) currentTarget() int32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.target
+}
+
+// rpcError keeps cancellation and deadline statuses and maps every other failure to Internal.
+func rpcError(ctx context.Context, err error, action string) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return status.FromContextError(ctxErr).Err()
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return status.FromContextError(err).Err()
+	}
+	return status.Errorf(codes.Internal, "%s: %v", action, err)
+}
+
+// rejectGroupOrDisabled guards both scale-down RPCs.
+func (p *Provider) rejectGroupOrDisabled(group string) error {
+	var err error
+	switch {
+	case group != p.cfg.NodeGroup:
+		err = status.Error(codes.NotFound, errUnknownGroup)
+	case !p.cfg.EnableScaleDown:
+		err = status.Error(codes.FailedPrecondition, "scale-down disabled in this demo")
+	default:
+		return nil
+	}
+	p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
+	return err
+}
+
+// NodeGroups returns the single configured node group.
 func (p *Provider) NodeGroups(context.Context, *protos.NodeGroupsRequest) (*protos.NodeGroupsResponse, error) {
 	return &protos.NodeGroupsResponse{NodeGroups: []*protos.NodeGroup{p.group()}}, nil
 }
 
+// NodeGroupForNode maps an observed node to the group, or returns an empty group.
 func (p *Provider) NodeGroupForNode(_ context.Context, req *protos.NodeGroupForNodeRequest) (*protos.NodeGroupForNodeResponse, error) {
 	if req == nil || req.Node == nil {
 		return &protos.NodeGroupForNodeResponse{NodeGroup: &protos.NodeGroup{}}, nil
@@ -133,24 +175,35 @@ func (p *Provider) NodeGroupForNode(_ context.Context, req *protos.NodeGroupForN
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, node := range p.nodes {
-		if req.Node.Name != "" && req.Node.Name == node.Name ||
-			req.Node.ProviderID != "" && req.Node.ProviderID == node.Spec.ProviderID {
-			return &protos.NodeGroupForNodeResponse{NodeGroup: p.group()}, nil
-		}
+	if p.observedIndex(req.Node) >= 0 {
+		return &protos.NodeGroupForNodeResponse{NodeGroup: p.group()}, nil
 	}
 	return &protos.NodeGroupForNodeResponse{NodeGroup: &protos.NodeGroup{}}, nil
 }
 
-func (p *Provider) NodeGroupTargetSize(_ context.Context, req *protos.NodeGroupTargetSizeRequest) (*protos.NodeGroupTargetSizeResponse, error) {
-	if req == nil || req.Id != p.cfg.NodeGroup {
-		return nil, status.Error(codes.NotFound, "unknown node group")
+// observedIndex finds requested among the observed nodes by name or ProviderID; it requires mu.
+func (p *Provider) observedIndex(requested *protos.ExternalGrpcNode) int {
+	if requested == nil {
+		return -1
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return &protos.NodeGroupTargetSizeResponse{TargetSize: p.target}, nil
+	for i, node := range p.nodes {
+		if requested.Name != "" && requested.Name == node.Name ||
+			requested.ProviderID != "" && requested.ProviderID == node.Spec.ProviderID {
+			return i
+		}
+	}
+	return -1
 }
 
+// NodeGroupTargetSize returns the current target size.
+func (p *Provider) NodeGroupTargetSize(_ context.Context, req *protos.NodeGroupTargetSizeRequest) (*protos.NodeGroupTargetSizeResponse, error) {
+	if req == nil || req.Id != p.cfg.NodeGroup {
+		return nil, status.Error(codes.NotFound, errUnknownGroup)
+	}
+	return &protos.NodeGroupTargetSizeResponse{TargetSize: p.currentTarget()}, nil
+}
+
+// NodeGroupIncreaseSize adds delta nodes, one minikube node add at a time.
 func (p *Provider) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGroupIncreaseSizeRequest) (*protos.NodeGroupIncreaseSizeResponse, error) {
 	var group string
 	var delta int32
@@ -158,10 +211,7 @@ func (p *Provider) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGr
 		group, delta = req.Id, req.Delta
 	}
 	fail := func(err error, progress int32) (*protos.NodeGroupIncreaseSizeResponse, error) {
-		p.mu.Lock()
-		current := p.target
-		p.mu.Unlock()
-		p.logger.Printf("scale-up failed group=%s delta=%d current=%d progress=%d/%d dry-run=%t error=%v", group, delta, current, progress, delta, p.cfg.DryRun, err)
+		p.logger.Printf("scale-up failed group=%s delta=%d current=%d progress=%d/%d dry-run=%t error=%v", group, delta, p.currentTarget(), progress, delta, p.cfg.DryRun, err)
 		return nil, err
 	}
 	if err := p.acquire(ctx); err != nil {
@@ -169,69 +219,51 @@ func (p *Provider) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGr
 	}
 	defer p.release()
 
-	p.mu.Lock()
-	current := p.target
-	p.mu.Unlock()
-	p.logger.Printf("scale-up request group=%s delta=%d current=%d dry-run=%t", group, delta, current, p.cfg.DryRun)
+	p.logger.Printf("scale-up request group=%s delta=%d current=%d dry-run=%t", group, delta, p.currentTarget(), p.cfg.DryRun)
 	if req == nil || group != p.cfg.NodeGroup {
-		return fail(status.Error(codes.NotFound, "unknown node group"), 0)
+		return fail(status.Error(codes.NotFound, errUnknownGroup), 0)
 	}
 	if delta <= 0 {
 		return fail(status.Error(codes.InvalidArgument, "increase delta must be positive"), 0)
 	}
 	if p.cfg.DryRun {
 		p.mu.Lock()
-		current = p.target
-		if delta > p.cfg.MaxNodes-current {
+		if delta > p.cfg.MaxNodes-p.target {
 			p.mu.Unlock()
 			return fail(status.Error(codes.FailedPrecondition, "increase exceeds maximum node group size"), 0)
 		}
 		p.target += delta
-		current = p.target
+		current := p.target
 		p.mu.Unlock()
 		p.logger.Printf("scale-up succeeded group=%s delta=%d target=%d dry-run=true", group, delta, current)
 		return &protos.NodeGroupIncreaseSizeResponse{}, nil
 	}
 
 	if err := p.refresh(ctx); err != nil {
-		if ctx.Err() != nil {
-			return fail(status.FromContextError(ctx.Err()).Err(), 0)
-		}
-		return fail(status.Errorf(codes.Internal, "refresh nodes before scale-up: %v", err), 0)
+		return fail(rpcError(ctx, err, "refresh nodes before scale-up"), 0)
 	}
-	p.mu.Lock()
-	current = p.target
-	p.mu.Unlock()
-	if delta > p.cfg.MaxNodes-current {
+	if delta > p.cfg.MaxNodes-p.currentTarget() {
 		return fail(status.Error(codes.FailedPrecondition, "increase exceeds maximum node group size"), 0)
 	}
 
 	var progress int32
 	for range delta {
 		if err := p.client.AddNode(ctx); err != nil {
-			if ctx.Err() != nil {
-				return fail(status.FromContextError(ctx.Err()).Err(), progress)
-			}
-			return fail(status.Errorf(codes.Internal, "add minikube node: %v", err), progress)
+			return fail(rpcError(ctx, err, "add minikube node"), progress)
 		}
 		if err := p.refresh(ctx); err != nil {
-			if ctx.Err() != nil {
-				return fail(status.FromContextError(ctx.Err()).Err(), progress)
-			}
-			return fail(status.Errorf(codes.Internal, "refresh nodes after scale-up: %v", err), progress)
+			return fail(rpcError(ctx, err, "refresh nodes after scale-up"), progress)
 		}
 		progress++
 	}
-	p.mu.Lock()
-	current = p.target
-	p.mu.Unlock()
-	p.logger.Printf("scale-up succeeded group=%s delta=%d target=%d dry-run=false", group, delta, current)
+	p.logger.Printf("scale-up succeeded group=%s delta=%d target=%d dry-run=false", group, delta, p.currentTarget())
 	return &protos.NodeGroupIncreaseSizeResponse{}, nil
 }
 
+// NodeGroupNodes returns the observed nodes as running instances.
 func (p *Provider) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRequest) (*protos.NodeGroupNodesResponse, error) {
 	if req == nil || req.Id != p.cfg.NodeGroup {
-		return nil, status.Error(codes.NotFound, "unknown node group")
+		return nil, status.Error(codes.NotFound, errUnknownGroup)
 	}
 	p.mu.Lock()
 	nodes := append([]corev1.Node(nil), p.nodes...)
@@ -253,9 +285,10 @@ func (p *Provider) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesR
 	return &protos.NodeGroupNodesResponse{Instances: instances}, nil
 }
 
+// NodeGroupTemplateNodeInfo returns a sanitized copy of an observed node as the scale-up template.
 func (p *Provider) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.NodeGroupTemplateNodeInfoRequest) (*protos.NodeGroupTemplateNodeInfoResponse, error) {
 	if req == nil || req.Id != p.cfg.NodeGroup {
-		return nil, status.Error(codes.NotFound, "unknown node group")
+		return nil, status.Error(codes.NotFound, errUnknownGroup)
 	}
 
 	p.mu.Lock()
@@ -285,6 +318,7 @@ func (p *Provider) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.Node
 	return &protos.NodeGroupTemplateNodeInfoResponse{NodeBytes: nodeBytes}, nil
 }
 
+// NodeGroupDeleteNodes deletes exactly one observed, non-control-plane worker.
 func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
 	var group string
 	if req != nil {
@@ -294,23 +328,7 @@ func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGro
 		p.logger.Printf("scale-down failed group=%s dry-run=%t error=%v", group, p.cfg.DryRun, err)
 		return nil, err
 	}
-	contextStatus := func(err error) error {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return status.FromContextError(ctxErr).Err()
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return status.FromContextError(err).Err()
-		}
-		return nil
-	}
-	if group != p.cfg.NodeGroup {
-		err := status.Error(codes.NotFound, "unknown node group")
-		p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
-		return nil, err
-	}
-	if !p.cfg.EnableScaleDown {
-		err := status.Error(codes.FailedPrecondition, "scale-down disabled in this demo")
-		p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
+	if err := p.rejectGroupOrDisabled(group); err != nil {
 		return nil, err
 	}
 	if len(req.Nodes) != 1 {
@@ -321,27 +339,15 @@ func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGro
 	}
 	defer p.release()
 	if err := p.refresh(ctx); err != nil {
-		if contextErr := contextStatus(err); contextErr != nil {
-			return fail(contextErr)
-		}
-		return fail(status.Errorf(codes.Internal, "refresh nodes before scale-down: %v", err))
+		return fail(rpcError(ctx, err, "refresh nodes before scale-down"))
 	}
 
 	p.mu.Lock()
-	if int32(len(p.nodes)) <= p.cfg.MinNodes {
+	if len(p.nodes) <= int(p.cfg.MinNodes) {
 		p.mu.Unlock()
 		return fail(status.Error(codes.FailedPrecondition, "deletion would breach minimum node group size"))
 	}
-	requested := req.Nodes[0]
-	index := -1
-	if requested != nil {
-		for i, node := range p.nodes {
-			if requested.Name != "" && requested.Name == node.Name || requested.ProviderID != "" && requested.ProviderID == node.Spec.ProviderID {
-				index = i
-				break
-			}
-		}
-	}
+	index := p.observedIndex(req.Nodes[0])
 	if index < 0 {
 		p.mu.Unlock()
 		return fail(status.Error(codes.NotFound, "node is not observed"))
@@ -356,9 +362,6 @@ func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGro
 		return fail(status.Error(codes.FailedPrecondition, "control-plane node cannot be deleted"))
 	}
 	if p.cfg.DryRun {
-		if p.dryRunDeleted == nil {
-			p.dryRunDeleted = make(map[string]struct{})
-		}
 		p.dryRunDeleted[node.Name] = struct{}{}
 		p.nodes = append(p.nodes[:index], p.nodes[index+1:]...)
 		p.target--
@@ -370,16 +373,10 @@ func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGro
 	p.mu.Unlock()
 
 	if err := p.client.DeleteNode(ctx, node.Name); err != nil {
-		if contextErr := contextStatus(err); contextErr != nil {
-			return fail(contextErr)
-		}
-		return fail(status.Errorf(codes.Internal, "delete minikube node: %v", err))
+		return fail(rpcError(ctx, err, "delete minikube node"))
 	}
 	if err := p.refresh(ctx); err != nil {
-		if contextErr := contextStatus(err); contextErr != nil {
-			return fail(contextErr)
-		}
-		return fail(status.Errorf(codes.Internal, "refresh nodes after scale-down: %v", err))
+		return fail(rpcError(ctx, err, "refresh nodes after scale-down"))
 	}
 	p.mu.Lock()
 	for _, observed := range p.nodes {
@@ -394,36 +391,31 @@ func (p *Provider) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGro
 	return &protos.NodeGroupDeleteNodesResponse{}, nil
 }
 
+// NodeGroupDecreaseTargetSize is rejected: minikube has no pending capacity to cancel.
 func (p *Provider) NodeGroupDecreaseTargetSize(_ context.Context, req *protos.NodeGroupDecreaseTargetSizeRequest) (*protos.NodeGroupDecreaseTargetSizeResponse, error) {
 	var group string
 	if req != nil {
 		group = req.Id
 	}
-	return nil, p.rejectScaleDown(group)
-}
-
-func (p *Provider) rejectScaleDown(group string) error {
-	var err error
-	switch {
-	case group != p.cfg.NodeGroup:
-		err = status.Error(codes.NotFound, "unknown node group")
-	case !p.cfg.EnableScaleDown:
-		err = status.Error(codes.FailedPrecondition, "scale-down disabled in this demo")
-	default:
-		err = status.Error(codes.Unimplemented, "scale-down is not implemented in this demo")
+	if err := p.rejectGroupOrDisabled(group); err != nil {
+		return nil, err
 	}
+	err := status.Error(codes.Unimplemented, "scale-down is not implemented in this demo")
 	p.logger.Printf("scale-down rejected group=%s error=%v", group, err)
-	return err
+	return nil, err
 }
 
+// GPULabel returns an empty label: the demo has no GPUs.
 func (p *Provider) GPULabel(context.Context, *protos.GPULabelRequest) (*protos.GPULabelResponse, error) {
 	return &protos.GPULabelResponse{}, nil
 }
 
+// GetAvailableGPUTypes returns no GPU types.
 func (p *Provider) GetAvailableGPUTypes(context.Context, *protos.GetAvailableGPUTypesRequest) (*protos.GetAvailableGPUTypesResponse, error) {
 	return &protos.GetAvailableGPUTypesResponse{}, nil
 }
 
+// Cleanup has nothing to release.
 func (p *Provider) Cleanup(context.Context, *protos.CleanupRequest) (*protos.CleanupResponse, error) {
 	return &protos.CleanupResponse{}, nil
 }

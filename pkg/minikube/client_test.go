@@ -106,3 +106,19 @@ func TestCommandIsLogged(t *testing.T) {
 		t.Fatalf("logs = %q", logs.String())
 	}
 }
+
+func TestRunCommandCapturesOutput(t *testing.T) {
+	stdout, stderr, err := runCommand(context.Background(), "sh", "-c", "echo out; echo err >&2; exit 3")
+	if string(stdout) != "out\n" || string(stderr) != "err\n" || err == nil {
+		t.Fatalf("runCommand() = %q, %q, %v", stdout, stderr, err)
+	}
+}
+
+func TestNodesRejectsInvalidJSON(t *testing.T) {
+	c := New("demo", time.Second, nil, func(context.Context, string, ...string) ([]byte, []byte, error) {
+		return []byte("not json"), nil, nil
+	})
+	if _, err := c.Nodes(context.Background()); err == nil || !strings.Contains(err.Error(), "decode kubectl nodes") {
+		t.Fatalf("Nodes() error = %v", err)
+	}
+}

@@ -1,4 +1,4 @@
-.PHONY: test shell-test tui-test race vet lint tidy-check vuln proto-check build generate check start provider deploy pressure watch remove-pressure cleanup
+.PHONY: test shell-test tui-test race cover vet lint tidy-check vuln proto-check build generate check start provider deploy pressure watch remove-pressure cleanup
 
 test: shell-test tui-test
 	go test ./...
@@ -16,6 +16,10 @@ tui-test:
 
 race:
 	go test -race ./...
+
+cover:
+	go test -coverprofile=coverage.out ./cmd/... ./pkg/...
+	go tool cover -func=coverage.out | awk '/^total:/ { sub(/%/, "", $$3); print "Go coverage " $$3 "% (minimum 90%)"; exit ($$3 + 0 < 90) }'
 
 vet:
 	go vet ./...

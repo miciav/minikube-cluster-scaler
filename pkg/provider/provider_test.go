@@ -1190,3 +1190,34 @@ func nodeList(nodes ...corev1.Node) []byte {
 	}
 	return b
 }
+
+func TestRefreshMapsCanceledContext(t *testing.T) {
+	p := testProvider(t, false, nodeRunner())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.Refresh(ctx, &protos.RefreshRequest{}); status.Code(err) != codes.Canceled {
+		t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.Canceled, err)
+	}
+}
+
+func TestRefreshMapsCommandCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p := testProvider(t, false, func(context.Context, string, ...string) ([]byte, []byte, error) {
+		cancel()
+		return nil, nil, context.Canceled
+	})
+	if _, err := p.Refresh(ctx, &protos.RefreshRequest{}); status.Code(err) != codes.Canceled {
+		t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.Canceled, err)
+	}
+}
+
+func TestAcquireTimesOutWhileGateHeld(t *testing.T) {
+	p := testProvider(t, false, nodeRunner())
+	<-p.gate
+	defer p.release()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := p.Refresh(ctx, &protos.RefreshRequest{}); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.DeadlineExceeded, err)
+	}
+}

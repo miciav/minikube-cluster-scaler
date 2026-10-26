@@ -18,7 +18,7 @@ The whole demo runs from one container image driven by a small `lab` command. No
 ### Prerequisites
 
 - A Linux VM (amd64 or arm64) with Docker, and your user in the `docker` group (`sudo usermod -aG docker "$USER"`, then log in again).
-- The **official** Linux binaries of [minikube](https://minikube.sigs.k8s.io/docs/start/) v1.38.0 or newer and [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) 1.34–1.36. Snap packages do not work: `lab` mounts the real binaries into the container, and a snap command is only a wrapper script.
+- The **official** Linux binaries of [minikube](https://minikube.sigs.k8s.io/docs/start/) v1.38.0 or newer and [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) 1.34–1.36. Snap packages do not work: `lab` mounts the real binaries into the container, and a snap command is a launcher that only works on the host.
 - 2 CPUs and 4 GiB of memory per minikube node, for up to three nodes.
 
 ### Install `lab`
@@ -26,11 +26,13 @@ The whole demo runs from one container image driven by a small `lab` command. No
 The image prints a wrapper bound to its own version:
 
 ```sh
-mkdir -p ~/bin
-docker run --rm ghcr.io/miciav/minikube-cluster-scaler:latest wrapper > ~/bin/lab
-chmod +x ~/bin/lab
+docker run --rm ghcr.io/miciav/minikube-cluster-scaler:latest wrapper > /tmp/lab \
+  && install -D -m 755 /tmp/lab ~/bin/lab
+export PATH="$HOME/bin:$PATH"   # new shells pick up ~/bin from ~/.profile
 lab check
 ```
+
+Writing to `/tmp/lab` first means a failed pull never leaves an empty `lab` behind.
 
 `lab check` shows which minikube, kubectl, Docker socket, minikube home and kubeconfig it found, and warns about incompatible versions.
 
@@ -73,7 +75,7 @@ lab cleanup          # delete the whole minikube profile
 
 ### Lab troubleshooting
 
-- **"… is a script or snap wrapper"**: install the official binary from the links above.
+- **"… is a script or snap wrapper"** or **"… snap …"**: install the official binary from the links above (`snap remove kubectl minikube` first).
 - **"cannot use Docker socket"**: add your user to the `docker` group and log in again.
 - **"… not found on PATH"**: install the tool, or set `LAB_MINIKUBE` / `LAB_KUBECTL`.
 - **"KUBECONFIG … lists several files"**: point `KUBECONFIG` at one file while using `lab`.

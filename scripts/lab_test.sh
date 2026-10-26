@@ -98,6 +98,17 @@ fails start
 grep -q 'minikube' "$case_dir/err"
 grep -q 'official binary' "$case_dir/err"
 
+# snap dispatcher rejected: /snap/bin/kubectl -> /usr/bin/snap, which is a real ELF
+setup snap
+mkdir -p "$case_dir/usr/bin"
+elf "$case_dir/usr/bin/snap"
+rm "$case_dir/bin/kubectl"
+ln -s "$case_dir/usr/bin/snap" "$case_dir/bin/kubectl"
+fails start
+grep -q 'kubectl' "$case_dir/err"
+grep -q 'snap' "$case_dir/err"
+grep -q 'official binary' "$case_dir/err"
+
 # missing kubectl
 setup nokubectl
 rm "$case_dir/bin/kubectl"

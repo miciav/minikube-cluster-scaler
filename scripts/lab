@@ -23,7 +23,14 @@ require_elf() {
 find_binary() {
   path=${2:-$(command -v "$1" 2>/dev/null || true)}
   [ -n "$path" ] || die "$1 not found on PATH: install the official binary (see README \"Lab\")"
+  case "$path" in
+    /snap/*) die "$1 at $path is a snap package, which cannot run in the container: install the official binary (see README \"Lab\")" ;;
+  esac
   path=$(readlink -f "$path") || die "cannot resolve $1 at $path"
+  # /snap/bin/<tool> resolves to the snap launcher, a real ELF that is not the tool.
+  case "$path" in
+    */snap) die "$1 resolves to the snap launcher $path: install the official binary (see README \"Lab\")" ;;
+  esac
   require_elf "$path" "$1"
   printf '%s\n' "$path"
 }

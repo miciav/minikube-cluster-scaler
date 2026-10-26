@@ -1,0 +1,12 @@
+*
+!go.mod
+!go.sum
+!cmd/
+!pkg/
+!proto/
+!scripts/
+!deploy/
+**/*_test.go
+**/*_test.sh
+**/*_test.py
+**/__pycache__

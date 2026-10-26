@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs the minikube autoscaling lab in a container; see README "Lab".
+set -eu
+
+LAB_IMAGE=${LAB_IMAGE:-__LAB_IMAGE__}

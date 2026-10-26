@@ -1,4 +1,6 @@
 #!/bin/sh
+# Stub bodies expand their variables when the stub runs, not here.
+# shellcheck disable=SC2016
 set -eu
 
 cd "$(dirname "$0")/.."

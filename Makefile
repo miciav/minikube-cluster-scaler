@@ -1,4 +1,4 @@
-.PHONY: test shell-test tui-test race cover vet lint tidy-check vuln proto-check build generate check start provider deploy pressure watch remove-pressure cleanup
+.PHONY: test shell-test tui-test race cover vet lint tidy-check vuln proto-check build image generate check start provider deploy pressure watch remove-pressure cleanup
 
 test: shell-test tui-test
 	go test ./...
@@ -11,6 +11,7 @@ shell-test:
 	./scripts/04-create-pressure_test.sh
 	./scripts/06-remove-pressure_test.sh
 	./scripts/99-cleanup_test.sh
+	./scripts/lab-entrypoint_test.sh
 	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 
@@ -46,6 +47,9 @@ proto-check: generate
 
 build:
 	go build -o /tmp/minikube-externalgrpc-provider ./cmd/provider
+
+image:
+	docker build -t minikube-cluster-scaler:dev .
 
 generate:
 	./proto/generate.sh

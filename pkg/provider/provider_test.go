@@ -867,6 +867,21 @@ func TestNodeGroupIncreaseSizeMapsCommandFailures(t *testing.T) {
 			t.Fatalf("target size = %d, want 1", got)
 		}
 	})
+
+	t.Run("command deadline", func(t *testing.T) {
+		p := testProvider(t, false, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+			if name == "kubectl" {
+				return nodeList(corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}}), nil, nil
+			}
+			return nil, nil, context.DeadlineExceeded
+		})
+		p.target = 1
+
+		_, err := p.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Id: "minikube-workers", Delta: 1})
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("status = %v, want %v (error %v)", status.Code(err), codes.DeadlineExceeded, err)
+		}
+	})
 }
 
 func TestRefreshAndIncreasePublishInOrder(t *testing.T) {

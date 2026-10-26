@@ -90,7 +90,6 @@ make build
 | `--max-nodes` | `3` | Maximum accepted group size. |
 | `--dry-run` | `false` | Simulates target changes without invoking minikube add or delete commands. |
 | `--enable-scale-down` | `false` | Enables validated worker deletion through `NodeGroupDeleteNodes`. |
-| `--v` | `1` | Accepted and reported; operation logs are currently unconditional. |
 
 Typical scale-up logs are intentionally explicit:
 

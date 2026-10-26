@@ -29,7 +29,6 @@ type options struct {
 	maxNodes        int64
 	dryRun          bool
 	enableScaleDown bool
-	verbosity       int
 }
 
 func parseFlags(args []string) (options, error) {
@@ -43,7 +42,6 @@ func parseFlags(args []string) (options, error) {
 	flags.Int64Var(&opts.maxNodes, "max-nodes", 3, "maximum node count")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "simulate scaling without changing minikube")
 	flags.BoolVar(&opts.enableScaleDown, "enable-scale-down", false, "enable the scale-down boundary")
-	flags.IntVar(&opts.verbosity, "v", 1, "log verbosity")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -67,9 +65,6 @@ func parseFlags(args []string) (options, error) {
 	}
 	if opts.minNodes > math.MaxInt32 || opts.maxNodes > math.MaxInt32 {
 		return options{}, fmt.Errorf("node bounds must fit int32")
-	}
-	if opts.verbosity < 0 {
-		return options{}, fmt.Errorf("verbosity must not be negative")
 	}
 	return opts, nil
 }
@@ -119,8 +114,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	defer listener.Close()
 	server := grpc.NewServer()
 	protos.RegisterCloudProviderServer(server, p)
-	logger.Printf("starting provider listen=%s profile=%s node-group=%s min-nodes=%d max-nodes=%d dry-run=%t enable-scale-down=%t v=%d",
-		opts.listen, opts.profile, opts.nodeGroup, opts.minNodes, opts.maxNodes, opts.dryRun, opts.enableScaleDown, opts.verbosity)
+	logger.Printf("starting provider listen=%s profile=%s node-group=%s min-nodes=%d max-nodes=%d dry-run=%t enable-scale-down=%t",
+		opts.listen, opts.profile, opts.nodeGroup, opts.minNodes, opts.maxNodes, opts.dryRun, opts.enableScaleDown)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()

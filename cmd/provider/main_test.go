@@ -21,7 +21,6 @@ func TestParseFlagsDefaults(t *testing.T) {
 		maxNodes:        3,
 		dryRun:          false,
 		enableScaleDown: false,
-		verbosity:       1,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseFlags() = %+v, want %+v", got, want)
@@ -37,7 +36,6 @@ func TestParseFlagsOverridesEveryFlag(t *testing.T) {
 		"--max-nodes=5",
 		"--dry-run=true",
 		"--enable-scale-down=true",
-		"--v=4",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +48,6 @@ func TestParseFlagsOverridesEveryFlag(t *testing.T) {
 		maxNodes:        5,
 		dryRun:          true,
 		enableScaleDown: true,
-		verbosity:       4,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseFlags() = %+v, want %+v", got, want)
@@ -66,7 +63,6 @@ func TestParseFlagsRejectsInvalidOptions(t *testing.T) {
 		"max before min": {"--min-nodes=4", "--max-nodes=3"},
 		"min overflow":   {"--min-nodes", "2147483648"},
 		"max overflow":   {"--max-nodes", "2147483648"},
-		"negative v":     {"--v=-1"},
 		"unknown flag":   {"--wat"},
 		"positional arg": {"extra"},
 	}

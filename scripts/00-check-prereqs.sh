@@ -22,11 +22,6 @@ if [ "$MINIKUBE_DRIVER" = docker ]; then
   fi
 fi
 
-if [ -z "$KUBERNETES_VERSION" ] || [ -z "$CA_VERSION" ]; then
-  printf '%s\n' 'error: KUBERNETES_VERSION and CA_VERSION must not be empty' >&2
-  exit 1
-fi
-
 kubernetes_minor=$(printf '%s\n' "$KUBERNETES_VERSION" | sed -E -n 's/^v?([0-9]+\.[0-9]+)(\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?)?$/\1/p')
 ca_minor=$(printf '%s\n' "$CA_VERSION" | sed -E -n 's/^v?([0-9]+\.[0-9]+)(\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?)?$/\1/p')
 if [ -z "$kubernetes_minor" ] || [ -z "$ca_minor" ]; then
@@ -43,11 +38,3 @@ kubectl version --client
 go version
 printf 'versions: Kubernetes %s, Cluster Autoscaler %s (major.minor %s)\n' "$KUBERNETES_VERSION" "$CA_VERSION" "$kubernetes_minor"
 printf 'driver: %s (ready)\n' "$MINIKUBE_DRIVER"
-
-for command in protoc protoc-gen-go protoc-gen-go-grpc; do
-  if command -v "$command" >/dev/null 2>&1; then
-    printf 'optional: %s found\n' "$command"
-  else
-    printf 'optional: %s not found (not required)\n' "$command"
-  fi
-done

@@ -5,6 +5,7 @@
 # ///
 
 import argparse
+import collections
 import datetime
 import json
 import math
@@ -61,12 +62,16 @@ def parse_items(output):
     return items
 
 
-def event_timestamp(event):
-    value = (
+def raw_timestamp(event):
+    return (
         event.get("eventTime")
         or event.get("lastTimestamp")
         or event.get("metadata", {}).get("creationTimestamp")
     )
+
+
+def event_timestamp(event):
+    value = raw_timestamp(event)
     return (
         datetime.datetime.fromisoformat(value)
         if value
@@ -215,10 +220,9 @@ def pods_table(snapshot):
 
 
 def summary_panel(snapshot, phase):
-    phases = {}
-    for pod in snapshot["pods"]:
-        pod_phase = sanitize(pod.get("status", {}).get("phase", "Unknown"))
-        phases[pod_phase] = phases.get(pod_phase, 0) + 1
+    phases = collections.Counter(
+        sanitize(pod.get("status", {}).get("phase", "Unknown")) for pod in snapshot["pods"]
+    )
     pod_counts = ", ".join(f"{name}: {count}" for name, count in sorted(phases.items())) or "none"
     provider = "reachable" if snapshot.get("provider_reachable") else "unreachable"
     autoscaler = "unavailable" if "decisions" in snapshot["errors"] else "available"
@@ -253,8 +257,7 @@ def events_panel(snapshot):
     elif snapshot["events"]:
         lines = []
         for event in snapshot["events"]:
-            metadata = event.get("metadata", {})
-            timestamp = event.get("eventTime") or event.get("lastTimestamp") or metadata.get("creationTimestamp", "-")
+            timestamp = raw_timestamp(event) or "-"
             reason = event.get("reason", "-")
             message = event.get("message", "-")
             lines.append(

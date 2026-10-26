@@ -21,7 +21,11 @@ FROM python:3.13-slim-trixie
 ARG LAB_IMAGE_TAG=dev
 LABEL org.opencontainers.image.source="https://github.com/miciav/minikube-cluster-scaler" \
       org.opencontainers.image.description="minikube Cluster Autoscaler lab"
-RUN pip install --no-cache-dir rich==14.3.4
+# pip is only needed to install rich; dropping it removes its vendored
+# packages (urllib3, msgpack, ...) from the image and from Trivy's scope.
+RUN pip install --no-cache-dir rich==14.3.4 \
+    && pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=build /out/minikube-externalgrpc-provider /usr/local/bin/minikube-externalgrpc-provider
 COPY scripts /opt/lab/scripts

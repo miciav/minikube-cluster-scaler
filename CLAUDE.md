@@ -9,15 +9,22 @@ A host-side Go implementation of the Kubernetes Cluster Autoscaler `externalgrpc
 ## Commands
 
 ```sh
+make verify      # lint tidy-check vuln cover race shell-test tui-test (what CI runs locally)
+make lint        # uvx pre-commit run --all-files (golangci-lint, shellcheck, ruff, bandit,
+                 # basedpyright, hadolint, kubeconform, actionlint, hygiene)
+make cover       # Go tests; fails below 90% total (cmd/ + pkg/)
+make tui-test    # observer unittest under coverage; fails below 90%
 make test        # shell-test + tui-test + go test ./...
 make race        # go test -race ./...
-make vet
+make vuln        # govulncheck
 make build       # -> /tmp/minikube-externalgrpc-provider
+make image       # lab image as minikube-cluster-scaler:dev
 make generate    # proto/generate.sh (pins exact protoc/plugin versions, fails otherwise)
+make sonar       # local SonarQube in Docker
 
 go test ./pkg/provider -run TestNodeGroupDeleteNodes   # single Go test
 ./scripts/04-create-pressure_test.sh                  # single shell test
-uv run --script scripts/05-watch-demo_test.py         # Python observer tests (unittest, needs uv)
+LAB_IMAGE=minikube-cluster-scaler:dev ./scripts/lab help   # try the wrapper against a local image
 
 go run ./cmd/provider --profile autoscaling-demo --dry-run   # no minikube commands executed
 ```
@@ -38,10 +45,14 @@ Demo flow (numbered scripts, also Makefile targets): `check` → `start` → `pr
 - `proto/`: committed `externalgrpc.proto` and generated bindings from the Cluster Autoscaler `cluster-autoscaler-1.35.0` tag. Never hand-edit `*.pb.go`; regenerate via `proto/generate.sh`.
 - `deploy/`: Cluster Autoscaler RBAC (with K8s 1.35 informer permissions), cloud-config, Deployment, and the pressure workload. `03-deploy-cluster-autoscaler.sh` patches image tag and scale-down env vars after applying.
 - `scripts/05-watch-demo.py`: standalone `uv` script (inline deps, `rich`) rendering a live TUI of nodes, pods, CA decisions and events. It shells out to kubectl; `collect_snapshot` takes injectable `runner`/`probe` for tests.
+- Lab container: `Dockerfile` packages the provider (`/usr/local/bin/minikube-externalgrpc-provider`), a docker CLI, Python+rich, `scripts/` and `deploy/` under `/opt/lab`, with `LAB_CONTAINER=1`. It contains **no** minikube/kubectl. `scripts/lab-entrypoint.sh` maps subcommands (`start`, `provider`, `deploy`, `watch`, …) to the numbered scripts; `wrapper` prints `scripts/lab` with `__LAB_IMAGE__` replaced by the image tag. `scripts/lab` (runs on the student's Linux VM) discovers the VM's minikube/kubectl (resolving symlinks, rejecting non-ELF snap shims), the Docker socket, `MINIKUBE_HOME`/`KUBECONFIG`, bind-mounts them at identical paths and runs the image with `--init --network host --user uid:gid`.
+- Container mode in scripts: `02-run-provider.sh` and `e2e-scale-down.sh` use `minikube-externalgrpc-provider` when on `PATH`, else Go; `00-check-prereqs.sh` with `LAB_CONTAINER=1` does not require go/uv. Both modes must keep working.
+- CI (`.github/workflows/`): `ci.yml` (pre-commit, go gates, proto drift, script tests, per-arch image build + Trivy + real e2e through `lab`), `release.yml` (GHCR multi-arch, `edge`/semver/`latest`), `codeql.yml`; Dependabot. Actions are pinned by SHA.
 
 ## Testing conventions
 
-- Shell scripts have sibling `*_test.sh` files that put fake `minikube`/`kubectl` stubs on `PATH` logging to `$TEST_LOG`, then grep the log. New script behavior needs an assertion there and, if new, a line in the Makefile `shell-test` target.
+- Shell scripts have sibling `*_test.sh` files that put fake `minikube`/`kubectl` stubs on `PATH` logging to `$TEST_LOG`, then grep the log. New script behavior needs an assertion there and, if new, a line in the Makefile `shell-test` target. Tests must pass on macOS sh and Linux dash; when a test needs a tool to be *absent*, build a PATH of symlinked utilities (CI runners ship go, kubectl and docker in `/usr/bin`).
+- `//nolint` and `# shellcheck disable` need a specific linter/code and a reason (`nolintlint` enforces it for Go).
 - The Python test imports `05-watch-demo.py` via `importlib` (hyphenated filename).
 
 ## Version policy

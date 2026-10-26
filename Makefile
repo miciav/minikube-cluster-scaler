@@ -1,7 +1,9 @@
-.PHONY: test shell-test tui-test race cover vet lint tidy-check vuln proto-check build image sonar generate check start provider deploy pressure watch remove-pressure cleanup
+.PHONY: verify test shell-test tui-test race cover vet lint tidy-check vuln proto-check build image sonar generate check start provider deploy pressure watch remove-pressure cleanup
 
 test: shell-test tui-test
 	go test ./...
+
+verify: lint tidy-check vuln cover race shell-test tui-test
 
 shell-test:
 	./scripts/00-check-prereqs_test.sh

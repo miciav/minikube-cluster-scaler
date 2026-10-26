@@ -34,6 +34,7 @@ C1_CONTROLS = range(127, 160)
 SECONDS_PER_MINUTE = 60
 SECONDS_PER_HOUR = 3600
 SECONDS_PER_DAY = 86400
+POD_PHASE_STYLES = {"Running": "green", "Pending": "yellow"}
 
 
 def sanitize(value):
@@ -224,7 +225,7 @@ def pods_table(snapshot):
             Text(sanitize(metadata.get("name", "-"))),
             Text(
                 phase,
-                style="green" if phase == "Running" else "yellow" if phase == "Pending" else "red",
+                style=POD_PHASE_STYLES.get(phase, "red"),
             ),
             Text(sanitize(pod.get("spec", {}).get("nodeName", "-"))),
         )

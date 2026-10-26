@@ -17,6 +17,8 @@ import (
 	protos "github.com/miciav/minikube-cluster-scaler/proto"
 )
 
+const errUnknownGroup = "unknown node group"
+
 // Config describes the single node group and the demo switches.
 type Config struct {
 	NodeGroup       string
@@ -150,7 +152,7 @@ func (p *Provider) rejectGroupOrDisabled(group string) error {
 	var err error
 	switch {
 	case group != p.cfg.NodeGroup:
-		err = status.Error(codes.NotFound, "unknown node group")
+		err = status.Error(codes.NotFound, errUnknownGroup)
 	case !p.cfg.EnableScaleDown:
 		err = status.Error(codes.FailedPrecondition, "scale-down disabled in this demo")
 	default:
@@ -196,7 +198,7 @@ func (p *Provider) observedIndex(requested *protos.ExternalGrpcNode) int {
 // NodeGroupTargetSize returns the current target size.
 func (p *Provider) NodeGroupTargetSize(_ context.Context, req *protos.NodeGroupTargetSizeRequest) (*protos.NodeGroupTargetSizeResponse, error) {
 	if req == nil || req.Id != p.cfg.NodeGroup {
-		return nil, status.Error(codes.NotFound, "unknown node group")
+		return nil, status.Error(codes.NotFound, errUnknownGroup)
 	}
 	return &protos.NodeGroupTargetSizeResponse{TargetSize: p.currentTarget()}, nil
 }
@@ -219,7 +221,7 @@ func (p *Provider) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGr
 
 	p.logger.Printf("scale-up request group=%s delta=%d current=%d dry-run=%t", group, delta, p.currentTarget(), p.cfg.DryRun)
 	if req == nil || group != p.cfg.NodeGroup {
-		return fail(status.Error(codes.NotFound, "unknown node group"), 0)
+		return fail(status.Error(codes.NotFound, errUnknownGroup), 0)
 	}
 	if delta <= 0 {
 		return fail(status.Error(codes.InvalidArgument, "increase delta must be positive"), 0)
@@ -261,7 +263,7 @@ func (p *Provider) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGr
 // NodeGroupNodes returns the observed nodes as running instances.
 func (p *Provider) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesRequest) (*protos.NodeGroupNodesResponse, error) {
 	if req == nil || req.Id != p.cfg.NodeGroup {
-		return nil, status.Error(codes.NotFound, "unknown node group")
+		return nil, status.Error(codes.NotFound, errUnknownGroup)
 	}
 	p.mu.Lock()
 	nodes := append([]corev1.Node(nil), p.nodes...)
@@ -286,7 +288,7 @@ func (p *Provider) NodeGroupNodes(_ context.Context, req *protos.NodeGroupNodesR
 // NodeGroupTemplateNodeInfo returns a sanitized copy of an observed node as the scale-up template.
 func (p *Provider) NodeGroupTemplateNodeInfo(_ context.Context, req *protos.NodeGroupTemplateNodeInfoRequest) (*protos.NodeGroupTemplateNodeInfoResponse, error) {
 	if req == nil || req.Id != p.cfg.NodeGroup {
-		return nil, status.Error(codes.NotFound, "unknown node group")
+		return nil, status.Error(codes.NotFound, errUnknownGroup)
 	}
 
 	p.mu.Lock()

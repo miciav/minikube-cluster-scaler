@@ -57,7 +57,7 @@ jobs:
         run: make race
       - name: Coverage gate (90%)
         run: make cover
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: go-coverage
@@ -92,7 +92,7 @@ jobs:
         run: make shell-test
       - name: Observer tests and coverage gate (90%)
         run: make tui-test
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: observer-coverage
@@ -145,7 +145,7 @@ jobs:
           minikube logs -p autoscaling-scale-down --file=minikube.log || true
           kubectl --context autoscaling-scale-down get events -A --sort-by=.lastTimestamp > events.txt || true
           kubectl --context autoscaling-scale-down -n kube-system logs deployment/cluster-autoscaler > cluster-autoscaler.log || true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: e2e-diagnostics-${{ matrix.arch }}

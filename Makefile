@@ -11,8 +11,12 @@ shell-test:
 	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 
+PY_COVERAGE = uv run --no-project --with 'rich>=14,<15' --with 'coverage>=7,<8' python -m coverage
+
 tui-test:
-	uv run --script scripts/05-watch-demo_test.py
+	$(PY_COVERAGE) run --include=scripts/05-watch-demo.py scripts/05-watch-demo_test.py
+	$(PY_COVERAGE) report --show-missing --fail-under=90
+	$(PY_COVERAGE) xml -q
 
 race:
 	go test -race ./...

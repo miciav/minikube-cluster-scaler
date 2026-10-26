@@ -163,6 +163,105 @@ esac
         ):
             self.assertEqual(watch_demo.main([]), 0)
 
+    def test_main_once_prints_screen(self):
+        output = StringIO()
+        with (
+            patch.object(watch_demo, "collect_snapshot", return_value=SNAPSHOT_ONE_NODE),
+            patch.object(watch_demo, "Console", return_value=Console(file=output, width=140)),
+        ):
+            self.assertEqual(watch_demo.main(["--once", "--profile", "demo"]), 0)
+        self.assertIn("profile=demo", output.getvalue())
+
+    def test_main_requires_tty_without_once(self):
+        with (
+            patch.object(watch_demo.sys.stdout, "isatty", return_value=False),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            self.assertEqual(watch_demo.main([]), 2)
+        self.assertIn("use --once", stderr.getvalue())
+
+    def test_main_refreshes_until_interrupted(self):
+        snapshots = [SNAPSHOT_ONE_NODE, SNAPSHOT_TWO_NODES]
+        with (
+            patch.object(watch_demo.sys.stdout, "isatty", return_value=True),
+            patch.object(watch_demo, "collect_snapshot", side_effect=snapshots),
+            patch.object(watch_demo, "Live") as live,
+            patch.object(watch_demo.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(watch_demo.main(["--interval", "0.5"]), 0)
+        live.return_value.__enter__.return_value.update.assert_called_once()
+
+    def test_object_age_units(self):
+        now = watch_demo.datetime.datetime(2026, 1, 2, tzinfo=watch_demo.datetime.UTC)
+        for created, expected in (
+            ("2026-01-01T23:59:01Z", "59s"),
+            ("2026-01-01T23:58:00Z", "2m"),
+            ("2026-01-01T21:00:00Z", "3h"),
+            ("2025-12-28T00:00:00Z", "5d"),
+            ("not-a-date", "?"),
+        ):
+            with self.subTest(created=created):
+                self.assertEqual(
+                    watch_demo.object_age({"creationTimestamp": created}, now), expected
+                )
+        self.assertEqual(watch_demo.object_age({}, now), "-")
+
+    def test_empty_sources_render_placeholders(self):
+        snapshot = {
+            "nodes": [],
+            "pods": [],
+            "events": [],
+            "decisions": [],
+            "errors": {},
+            "provider_reachable": False,
+            "collected_at": "2026-06-30T10:00:00+00:00",
+        }
+        output = StringIO()
+        Console(file=output, width=140, height=24, color_system=None).print(
+            watch_demo.build_screen(snapshot, None, "demo", 2.0)
+        )
+        text = output.getvalue()
+        for expected in (
+            "No nodes found",
+            "No pressure Pods found",
+            "No recent autoscaler decisions",
+            "No recent Kubernetes events",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
+    def test_failed_sources_render_errors(self):
+        snapshot = {
+            "nodes": [],
+            "pods": [],
+            "events": [],
+            "decisions": [],
+            "errors": {"pods": "pods down", "decisions": "logs down"},
+            "provider_reachable": True,
+            "collected_at": "2026-06-30T10:00:00+00:00",
+        }
+        output = StringIO()
+        Console(file=output, width=140, height=24, color_system=None).print(
+            watch_demo.build_screen(snapshot, None, "demo", 2.0)
+        )
+        text = output.getvalue()
+        self.assertIn("Error: pods down", text)
+        self.assertIn("Error: logs down", text)
+
+    def test_decision_and_probe_failures_are_isolated(self):
+        def runner(args):
+            if "logs" in args:
+                raise subprocess.CalledProcessError(1, args)
+            return '{"items":[]}'
+
+        def probe():
+            raise OSError("probe failed")
+
+        snapshot = watch_demo.collect_snapshot("demo", runner=runner, probe=probe)
+        self.assertIn("decisions", snapshot["errors"])
+        self.assertEqual(snapshot["errors"]["provider_reachable"], "probe failed")
+        self.assertFalse(snapshot["provider_reachable"])
+
     def test_build_screen_renders_observer_state(self):
         output = StringIO()
         console = Console(file=output, width=140, height=24, color_system=None)

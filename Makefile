@@ -4,10 +4,13 @@ test: shell-test tui-test
 	go test ./...
 
 shell-test:
+	./scripts/00-check-prereqs_test.sh
 	./scripts/01-start-minikube_test.sh
+	./scripts/02-run-provider_test.sh
 	./scripts/03-deploy-cluster-autoscaler_test.sh
 	./scripts/04-create-pressure_test.sh
 	./scripts/06-remove-pressure_test.sh
+	./scripts/99-cleanup_test.sh
 	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 

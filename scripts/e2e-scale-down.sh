@@ -65,8 +65,13 @@ wait_for_ready_nodes() {
 
 PROFILE="$PROFILE" ./scripts/01-start-minikube.sh
 owns_profile=true
-go build -o "$provider_bin" ./cmd/provider
-"$provider_bin" --profile "$PROFILE" --node-group minikube-workers --min-nodes 1 --max-nodes 3 --enable-scale-down=true --listen 0.0.0.0:9090 >"$provider_log" 2>&1 &
+if command -v minikube-externalgrpc-provider >/dev/null 2>&1; then
+  provider_cmd=$(command -v minikube-externalgrpc-provider)
+else
+  go build -o "$provider_bin" ./cmd/provider
+  provider_cmd=$provider_bin
+fi
+"$provider_cmd" --profile "$PROFILE" --node-group minikube-workers --min-nodes 1 --max-nodes 3 --enable-scale-down=true --listen 0.0.0.0:9090 >"$provider_log" 2>&1 &
 provider_pid=$!
 wait_for_provider
 PROFILE="$PROFILE" SCALE_DOWN_DELAY_AFTER_ADD=1m SCALE_DOWN_UNNEEDED_TIME=1m ./scripts/03-deploy-cluster-autoscaler.sh

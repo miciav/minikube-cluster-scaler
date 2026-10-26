@@ -5,8 +5,9 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+grep -Fq 'command -v minikube-externalgrpc-provider' scripts/e2e-scale-down.sh
 grep -Fq 'go build -o "$provider_bin" ./cmd/provider' scripts/e2e-scale-down.sh
-grep -Fq '"$provider_bin" --profile "$PROFILE"' scripts/e2e-scale-down.sh
+grep -Fq '"$provider_cmd" --profile "$PROFILE"' scripts/e2e-scale-down.sh
 grep -Fq 'minikube ssh -p "$PROFILE" -- "nc -z -w 2 host.minikube.internal 9090"' scripts/e2e-scale-down.sh
 grep -Fq 'kill -0 "$provider_pid"' scripts/e2e-scale-down.sh
 grep -Fq 'wait "$provider_pid"' scripts/e2e-scale-down.sh

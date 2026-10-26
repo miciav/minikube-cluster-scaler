@@ -12,6 +12,7 @@ shell-test:
 	./scripts/06-remove-pressure_test.sh
 	./scripts/99-cleanup_test.sh
 	./scripts/lab-entrypoint_test.sh
+	./scripts/lab_test.sh
 	./scripts/e2e-scale-down_test.sh
 	./deploy/cluster-autoscaler-rbac_test.sh
 

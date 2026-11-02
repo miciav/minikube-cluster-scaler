@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # minikube's docker driver shells out to the docker CLI.
 FROM docker:29.9.2-cli AS docker-cli
 
-FROM python:3.13-slim-trixie
+FROM python:3.14-slim-trixie
 ARG LAB_IMAGE_TAG=dev
 LABEL org.opencontainers.image.source="https://github.com/miciav/minikube-cluster-scaler" \
       org.opencontainers.image.description="minikube Cluster Autoscaler lab"

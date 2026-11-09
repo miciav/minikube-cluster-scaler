@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags='-s -w' -o /out/minikube-externalgrpc-provider ./cmd/provider
 
 # minikube's docker driver shells out to the docker CLI.
-FROM docker:29.9.2-cli AS docker-cli
+FROM docker:29.9.3-cli AS docker-cli
 
 FROM python:3.13-slim-trixie
 ARG LAB_IMAGE_TAG=dev
